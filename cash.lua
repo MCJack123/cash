@@ -176,7 +176,13 @@ function shell.complete(prefix)
 end
 
 function shell.completeProgram(prefix)
-    return fs.complete(prefix, PWD, true, false)
+    if string.find(prefix, "/") then
+        return fs.complete(prefix, PWD, true, false)
+    else
+        local retval = {}
+        for path in string.gmatch(PATH, "[^:]+") do combineArray(retval, fs.complete(prefix, path, true, false)) end
+        return retval
+    end
 end
 
 function shell.setCompletionFunction(path, completionFunction)
@@ -488,6 +494,7 @@ local function readCommand()
                         for k,v in ipairs(res) do longest = getLongest(longest, v) end
                         if longest == "" then
                             if not waitTab then waitTab = true else
+                                for k,v in ipairs(res) do res[k] = tokens[table.maxn(tokens)] .. v end
                                 print("")
                                 textutils.pagedTabulate(res)
                                 ansiWrite(getPrompt())
@@ -499,8 +506,8 @@ local function readCommand()
                             waitTab = false
                         end
                     end
-                else
-                    local res = fs.complete(tokens[table.maxn(tokens)], shell.path())
+                elseif tokens[1] == nil then
+                    local res = shell.completeProgram(tokens[0])
                     if #res > 0 then
                         local longest = res[1]
                         local function getLongest(a, b)
@@ -510,6 +517,30 @@ local function readCommand()
                         for k,v in ipairs(res) do longest = getLongest(longest, v) end
                         if longest == "" then
                             if not waitTab then waitTab = true else
+                                for k,v in ipairs(res) do res[k] = string.gsub(fs.getName(tokens[0]), "%.lua", "") .. v end
+                                print("")
+                                textutils.pagedTabulate(res)
+                                ansiWrite(getPrompt())
+                                ox, oy = term.getCursorPos()
+                            end
+                        else
+                            str = str .. string.gsub(longest, "%.lua", "")
+                            coff = #str
+                            waitTab = false
+                        end
+                    end
+                else
+                    local res = fs.complete(tokens[table.maxn(tokens)], PWD, true, true)
+                    if #res > 0 then
+                        local longest = res[1]
+                        local function getLongest(a, b)
+                            for i = 1, math.min(#a, #b) do if string.sub(a, i, i) ~= string.sub(b, i, i) then return string.sub(a, 1, i-1) end end
+                            return a 
+                        end
+                        for k,v in ipairs(res) do longest = getLongest(longest, v) end
+                        if longest == "" then
+                            if not waitTab then waitTab = true else
+                                for k,v in ipairs(res) do res[k] = fs.getName(tokens[table.maxn(tokens)]) .. v end
                                 print("")
                                 textutils.pagedTabulate(res)
                                 ansiWrite(getPrompt())

@@ -903,7 +903,7 @@ local function readCommand()
                     local t = {}
                     for i = 1, table.maxn(tokens) - 1 do t[i] = tokens[i] end
                     local res = completion[tokens[0]].fnComplete(shell, table.maxn(tokens), tokens[table.maxn(tokens)], t)
-                    if #res > 0 then
+                    if res and #res > 0 then
                         local longest = res[1]
                         local function getLongest(a, b)
                             for i = 1, math.min(#a, #b) do if string.sub(a, i, i) ~= string.sub(b, i, i) then return string.sub(a, 1, i-1) end end
@@ -926,7 +926,7 @@ local function readCommand()
                     end
                 elseif tokens[1] == nil then
                     local res = shell.completeProgram(tokens[0])
-                    if #res > 0 then
+                    if res and #res > 0 then
                         local longest = res[1]
                         local function getLongest(a, b)
                             for i = 1, math.min(#a, #b) do if string.sub(a, i, i) ~= string.sub(b, i, i) then return string.sub(a, 1, i-1) end end
@@ -949,7 +949,7 @@ local function readCommand()
                     end
                 else
                     local res = fs.complete(tokens[table.maxn(tokens)], PWD, true, true)
-                    if #res > 0 then
+                    if res and #res > 0 then
                         local longest = res[1]
                         local function getLongest(a, b)
                             for i = 1, math.min(#a, #b) do if string.sub(a, i, i) ~= string.sub(b, i, i) then return string.sub(a, 1, i-1) end end

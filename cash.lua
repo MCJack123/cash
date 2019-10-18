@@ -18,7 +18,7 @@ end
 HOME = "/"
 SHELL = topshell and topshell.getRunningProgram() or "/usr/bin/cash"
 PATH = topshell and string.gsub(topshell.path(), "%.:", "") or "/rom/programs:/rom/programs/fun:/rom/programs/rednet"
-USER = "root"
+USER = kernel and users.getShortName(users.getuid()) or "root"
 EDITOR = "edit"
 OLDPWD = topshell and topshell.dir() or "/"
 PWD = topshell and topshell.dir() or "/"
@@ -46,23 +46,26 @@ local vars = {
 
 local aliases = topshell and topshell.aliases() or {}
 local completion = topshell and topshell.getCompletionInfo() or {}
+local if_table, if_statement = {}, 0
+local while_table, while_statement = {}, 0
+local case_table, case_statement = {}, 0
 
 local builtins = {
-    echo = print,
+    echo = function(...) print(...); return 0 end,
     builtin = function(name, ...) return builtin[name](...) end,
     cd = function(dir)
         if not fs.isDir(shell.resolve(dir or "/")) then 
             printError("cash: cd: " .. dir .. ": No such file or directory")
-            return 
+            return 1
         end
         OLDPWD = PWD
         PWD = shell.resolve(dir or "/") 
     end,
-    command = function(...) shell.run(...) end,
+    command = function(...) shell.run(...); return vars["?"] end,
     complete = function() end, -- TODO
     dirs = function() print(PWD) end,
-    eval = function(...) shell.run(...) end,
-    exec = function(...) shell.run(...) end,
+    eval = function(...) shell.run(...); return vars["?"] end,
+    exec = function(...) shell.run(...); return vars["?"] end,
     exit = shell.exit,
     export = function(...)
         local vars = {...}
@@ -95,15 +98,91 @@ local builtins = {
             end
         end
     end,
-    test = function(...) -- TODO
-
+    test = function(...) -- TODO: add and/or
+        local args = {...}
+        local function n(v) return v end
+        if args[1] == "!" then
+            table.remove(args, 1)
+            n = function(v) return not v end
+        end
+        if string.sub(args[1], 1, 1) == "-" then
+            if args[2] == nil then  end
+            if args[1] == "-d" then return n(fs.exists(shell.resolve(args[2])) and fs.isDir(shell.resolve(args[2])))
+            elseif args[1] == "-e" then return n(fs.exists(shell.resolve(args[2])))
+            elseif args[1] == "-f" then return n(fs.exists(shell.resolve(args[2])) and not fs.isDir(shell.resolve(args[2])))
+            elseif args[1] == "-n" then return n(#args[2] > 0)
+            elseif args[1] == "-s" then return n(fs.getSize(shell.resolve(args[2])) > 0)
+            elseif args[1] == "-u" and type(kernel) == "table" then return n(fs.hasPermissions(shell.resolve(args[2]), fs.permissions.setuid))
+            elseif args[1] == "-w" then return n(not fs.isReadOnly(shell.resolve(args[2])))
+            elseif args[1] == "-x" then return n(true)
+            elseif args[1] == "-z" then return n(#args[2] == 0)
+            else return n(false) end
+        elseif string.sub(args[2], 1, 1) == "-" then
+            if args[2] == "-eq" then return n(tonumber(args[1]) == tonumber(args[3]))
+            elseif args[2] == "-ne" then return n(tonumber(args[1]) ~= tonumber(args[3]))
+            elseif args[2] == "-lt" then return n(tonumber(args[1]) < tonumber(args[3]))
+            elseif args[2] == "-gt" then return n(tonumber(args[1]) > tonumber(args[3]))
+            elseif args[2] == "-le" then return n(tonumber(args[1]) <= tonumber(args[3]))
+            elseif args[2] == "-ge" then return n(tonumber(args[1]) >= tonumber(args[3]))
+            else return n(false) end
+        elseif args[2] == "=" then return n(args[1] == args[3])
+        elseif args[2] == "!=" then return n(args[1] ~= args[3])
+        else
+            printError("cash: test: expected unary operator")
+            return 2
+        end
     end,
     unalias = function(...) for k,v in ipairs({...}) do alias[v] = nil end end,
     unset = function(...) for k,v in ipairs({...}) do vars[v] = nil end end,
     lua = function(...)
-        if #({...}) > 0 then print(loadstring("return " .. table.concat({...}, " "))()) else shell.run("/rom/programs/lua.lua") end
+        if #({...}) > 0 then 
+            local f, err = loadstring("return " .. table.concat({...}, " "))
+            if f then print(pcall(f)) else printError(err) end 
+        else shell.run("/rom/programs/lua.lua") end
+    end,
+    cat = function(...)
+        for k,v in ipairs({...}) do
+            local file = fs.open(v, "r")
+            if file ~= nil then
+                print(file.readAll())
+                file.close()
+            end
+        end
+    end,
+    which = function(name) local name, v = shell.resolveProgram(name); if not v and name then print(name) end end,
+    ["if"] = function(...)
+        shell.run(...)
+        table.insert(if_table, {cond = vars["?"] == 0, inv = false})
+    end,
+    ["then"] = function(...) 
+        if if_statement >= table.maxn(if_table) then
+            printError("cash: syntax error near unexpected token `then'")
+            return -1
+        end
+        if_statement = if_statement + 1
+        shell.run(...) 
+        return vars["?"]
+    end,
+    ["else"] = function(...)
+        if if_statement < 1 or if_table[if_statement].inv then
+            printError("cash: syntax error near unexpected token `else'")
+            return -1
+        end
+        if_table[if_statement].inv = true
+        if_table[if_statement].cond = not if_table[if_statement].cond
+        shell.run(...)
+        return vars["?"]
+    end,
+    fi = function()
+        if if_statement < 1 then
+            printError("cash: syntax error near unexpected token `fi'")
+            return -1
+        end
+        table.remove(if_table, if_statement)
+        if_statement = if_statement - 1
     end
 }
+builtins["["] = builtins.test
 
 function shell.exit()
     running = false
@@ -138,8 +217,8 @@ function shell.resolveProgram(name)
         if fs.exists(fs.combine(shell.resolve(path), name)) then return fs.combine(shell.resolve(path), name)
         elseif fs.exists(fs.combine(shell.resolve(path), name .. ".lua")) then return fs.combine(shell.resolve(path), name .. ".lua") end
     end
-    if fs.exists(shell.resolve(name)) then return shell.resolve(name), true end
-    if fs.exists(shell.resolve(name .. ".lua")) then return shell.resolve(name .. ".lua"), true end
+    if fs.exists(shell.resolve(name)) and not fs.isDir(shell.resolve(name)) then return shell.resolve(name), string.find(name, "/") == nil end
+    if fs.exists(shell.resolve(name .. ".lua")) and not fs.isDir(shell.resolve(name .. ".lua")) then return shell.resolve(name .. ".lua"), string.find(name, "/") == nil end
     return nil
 end
 
@@ -222,10 +301,18 @@ local function tokenize(cmdline)
     local escape = false
     local expstr = ""
     local i = 1
+    local function tostr(v)
+        if type(v) == "boolean" then return v and "true" or "false"
+        elseif v == nil then return "nil"
+        elseif type(v) == "table" then return textutils.serialize(v)
+        elseif type(v) == "string" then return v
+        else return tostring(v) end
+    end
     while i <= #cmdline do
         local c = string.sub(cmdline, i, i)
         if c == '$' and not escape and not singleQuote then
             local s, n = expandVar(string.sub(cmdline, i))
+            s = tostr(s)
             expstr = expstr .. s
             i = i + n
         else
@@ -255,12 +342,12 @@ local function tokenize(cmdline)
     path = path or retval[0]
     if not (islocal and string.find(retval[0], "/") == nil) then retval[0] = path end
     retval.vars = {}
-    i = 1
-    while i < table.maxn(retval) do
-        if string.find(retval[i], "=") then
-            retval.vars[string.sub(retval[i], 1, string.find(retval[i], "=") - 1)] = string.sub(retval[i], string.find(retval[i], "=") + 1)
-            table.remove(retval, i)
-        else i=i+1 end
+    if #retval > 1 then
+        while retval[0] and string.find(retval[0], "=") do
+            retval.vars[string.sub(retval[0], 1, string.find(retval[0], "=") - 1)] = string.sub(retval[0], string.find(retval[0], "=") + 1)
+            retval[0] = nil
+            for i = 1, table.maxn(retval) do retval[i-1] = retval[i] end
+        end
     end
     return retval
 end
@@ -291,18 +378,51 @@ local function getPrompt()
         ["\\s"] = string.gsub(fs.getName(vars["0"]), ".lua", ""),
         ["\\t"] = textutils.formatTime(os.epoch(), true),
         ["\\T"] = textutils.formatTime(os.epoch(), false),
-        ["\\u"] = "root",
+        ["\\u"] = USER,
         ["\\v"] = vars.CASH_VERSION,
         ["\\V"] = vars.CASH_VERSION,
         ["\\w"] = PWD,
         ["\\W"] = fs.getName(PWD) == "." and "/" or fs.getName(PWD),
         ["\\%#"] = vars.LINENUM,
-        ["\\%$"] = "#",
+        ["\\%$"] = USER == "root" and "#" or "$",
         ["\\([0-7][0-7][0-7])"] = function(n) return string.char(tonumber(n, 8)) end,
         ["\\\\"] = "\\",
         ["\\%[.+\\%]"] = ""
     }) do retval = string.gsub(retval, k, v) end
     return retval
+end
+
+local function run( _tEnv, _sPath, ... )
+    if type( _tEnv ) ~= "table" then
+        error( "bad argument #1 (expected table, got " .. type( _tEnv ) .. ")", 2 ) 
+    end
+    if type( _sPath ) ~= "string" then
+        error( "bad argument #2 (expected string, got " .. type( _sPath ) .. ")", 2 ) 
+    end
+    local tArgs = table.pack( ... )
+    local tEnv = _tEnv
+    setmetatable( tEnv, { __index = _G } )
+    local fnFile, err = loadfile( _sPath, tEnv )
+    if fnFile then
+        local ok, err = pcall( function()
+            vars["?"] = fnFile( table.unpack( tArgs, 1, tArgs.n ) )
+            if vars["?"] == nil or vars["?"] == true then vars["?"] = 0 
+            elseif vars["?"] == false then vars["?"] = 1 end
+        end )
+        if not ok then
+            if err and err ~= "" then
+                printError( err )
+            end
+            vars["?"] = 1
+            return false
+        end
+        return true
+    end
+    if err and err ~= "" then
+        printError( err )
+    end
+    vars["?"] = 1
+    return false
 end
 
 local function execv(tokens)
@@ -317,11 +437,15 @@ local function execv(tokens)
         oldenv[k] = _ENV[k]
         _ENV[k] = v 
     end
-    if builtins[path] ~= nil then builtins[path](table.unpack(tokens))
-    else 
+    if if_statement > 0 and not if_table[if_statement].cond and path ~= "else" and path ~= "elif" and path ~= "fi" then return end
+    if builtins[path] ~= nil then 
+        vars["?"] = builtins[path](table.unpack(tokens))
+        if vars["?"] == nil or vars["?"] == true then vars["?"] = 0 
+        elseif vars["?"] == false then vars["?"] = 1 end
+    else
         local _old = vars._
         vars._ = path
-        os.run(setmetatable({shell = shell}, {__index = _ENV}), path, table.unpack(tokens)) 
+        run(setmetatable({shell = shell}, {__index = _ENV}), path, table.unpack(tokens)) 
         vars._ = _old
     end
     for k,v in pairs(tokens.vars) do _ENV[k] = oldenv[k] end
@@ -329,10 +453,12 @@ end
 
 function shell.run(...)
     local cmd = table.concat({...}, " ")
+    if cmd == "" then return end
     --for cmd in string.gmatch(str, "[^;]+") do
         cmd = string.sub(cmd, string.find(cmd, "[^ ]"), nil)
         if string.sub(cmd, 1, 1) ~= "#" then execv(tokenize(cmd)) end
     --end
+    return vars["?"] == 0
 end
 
 if args[1] ~= nil then
@@ -343,10 +469,23 @@ if args[1] ~= nil then
     return
 end
 
-if fs.exists(".cashrc") then
-    local file = io.open(".cashrc", "r")
-    for line in file:lines() do shell.run(line) end
-    file:close()
+if kernel then
+    if fs.exists("/etc/cashrc") then
+        local file = io.open("/etc/cashrc", "r")
+        for line in file:lines() do shell.run(line) end
+        file:close()
+    end
+    if fs.exists("/~/.cashrc") then
+        local file = io.open("/~/.cashrc", "r")
+        for line in file:lines() do shell.run(line) end
+        file:close()
+    end
+else
+    if fs.exists(".cashrc") then
+        local file = io.open(".cashrc", "r")
+        for line in file:lines() do shell.run(line) end
+        file:close()
+    end
 end
 
 local function ansiWrite(str)
@@ -445,7 +584,10 @@ local function readCommand()
             i=i+1
         end
         if x == nil then x, y = term.getCursorPos() end
-        for i = 0, lastlen - #str - 1 do term.write(" ") end
+        for i = 0, lastlen - #str - 1 do write(" ") end
+        if term.getCursorPos() == 1 and lastlen > #str then
+            term.write(" ")
+        end
         lastlen = #str
         term.setCursorPos(x, y)
     end
@@ -557,6 +699,10 @@ local function readCommand()
         elseif ev[1] == "char" then
             str = string.sub(str, 1, coff) .. ev[2] .. string.sub(str, coff + 1)
             coff = coff + 1
+            waitTab = false
+        elseif ev[1] == "paste" then
+            str = string.sub(str, 1, coff) .. ev[2] .. string.sub(str, coff + 1)
+            coff = coff + #ev[2]
             waitTab = false
         end
         redrawStr()

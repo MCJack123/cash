@@ -1,4 +1,4 @@
-# cash
+# ComputerCraft Advanced Shell
 A Bourne-compatible shell for ComputerCraft.
 
 ![image](image.png)

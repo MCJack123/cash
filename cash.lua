@@ -3,6 +3,12 @@
 
 local topshell = _ENV.shell
 local shell = {}
+local pack = {}
+_ENV.package = nil
+_G.package = nil
+package = nil
+_ENV.require = nil
+_G.require = nil
 local start_time = os.epoch()
 local args = {...}
 local running = true
@@ -36,7 +42,7 @@ local vars = {
     SECONDS = function() return math.floor((os.epoch() - start_time) / 1000) end,
     HOSTNAME = os.getComputerLabel(),
     ["*"] = table.concat(args, " "),
-    ["@"] = table.concat(args, " "),
+    ["@"] = function() return table.concat(args, " ") end,
     ["#"] = #args,
     ["?"] = 0,
     ["0"] = topshell and topshell.getRunningProgram(),
@@ -50,9 +56,11 @@ local if_table, if_statement = {}, 0
 local while_table, while_statement = {}, 0
 local case_table, case_statement = {}, 0
 local function_name = nil
+local functions = {}
 local history = {}
 local historyfile
 local run_tokens
+local function_running = false
 
 local builtins = {
     echo = function(...) print(...); return 0 end,
@@ -218,17 +226,142 @@ local builtins = {
         while_statement = while_statement - 1
         if while_statement == 0 then
             local last = table.remove(while_table, while_statement + 1)
-            shell.run(table.unpack(last.cond))
+            if type(last.cond) == "function" then last.cond()
+            else shell.run(table.unpack(last.cond)) end
             local cond = vars["?"]
             while cond == 0 do
-                for k,v in ipairs(last.lines) do shell.run(v) end
-                shell.run(table.unpack(last.cond))
+                for k,v in ipairs(last.lines) do 
+                    if type(v) == "function" then v()
+                    else shell.run(v) end
+                end
+                if type(last.cond) == "function" then last.cond()
+                else shell.run(table.unpack(last.cond)) end
                 cond = vars["?"]
             end
         end
-    end
+    end,
+    ["for"] = function(...)
+        local args = {...}
+        if args[2] ~= "in" then
+            printError("cash: missing `in' in for loop")
+            return -1
+        end
+        local i = 2
+        table.insert(while_table, {cond = function() i = i + 1; vars["?"] = args[i] ~= nil and 0 or 1 end, lines = {function() vars[args[1]] = args[i] end}})
+    end,
+    ["function"] = function(name, p)
+        if function_name ~= nil then
+            printError("cash: syntax error near unexpected token `function'")
+            return -1
+        end
+        if p ~= "{" then
+            printError("cash: syntax error near token `" .. name .. "'")
+            return -1
+        end
+        function_name = name
+        functions[function_name] = {}
+    end,
+    ["}"] = function() 
+        if function_name == nil then
+            printError("cash: syntax error near unexpected token `}'")
+            return -1
+        end
+        function_name = nil 
+    end,
+    ["return"] = function(var)
+        if function_running == false then
+            printError("cash: syntax error near unexpected token `return'")
+            return -1
+        end
+        function_running = false
+        return var
+    end,
 }
 builtins["["] = builtins.test
+
+pack.loaded = {
+    _G = _G,
+    bit32 = bit32,
+    coroutine = coroutine,
+    math = math,
+    package = pack,
+    string = string,
+    table = table,
+}
+pack.loaders = {
+    function( name )
+        if pack.preload[name] then
+            return pack.preload[name]
+        else
+            return nil, "no field package.preload['" .. name .. "']"
+        end
+    end,
+    function( name )
+        local fname = string.gsub(name, "%.", "/")
+        local sError = ""
+        for pattern in string.gmatch(pack.path, "[^;]+") do
+            local sPath = string.gsub(pattern, "%?", fname)
+            if sPath:sub(1,1) ~= "/" then
+                sPath = fs.combine(PWD, sPath)
+            end
+            if fs.exists(sPath) and not fs.isDir(sPath) then
+                local fnFile, sError = loadfile( sPath, setmetatable({shell = shell, package = pack, require = require}, {__index = _ENV}) )
+                if fnFile then
+                    return fnFile, sPath
+                else
+                    return nil, sError
+                end
+            else
+                if #sError > 0 then
+                    sError = sError .. "\n"
+                end
+                sError = sError .. "no file '" .. sPath .. "'!"
+            end
+        end
+        return nil, sError
+    end
+}
+pack.preload = {}
+pack.config = "/\n;\n?\n!\n-"
+pack.path = "?;?.lua;?/init.lua;/rom/modules/main/?;/rom/modules/main/?.lua;/rom/modules/main/?/init.lua"
+if turtle then
+    pack.path = pack.path..";/rom/modules/turtle/?;/rom/modules/turtle/?.lua;/rom/modules/turtle/?/init.lua"
+elseif command then
+    pack.path = pack.path..";/rom/modules/command/?;/rom/modules/command/?.lua;/rom/modules/command/?/init.lua"
+end
+pack.custom = true
+
+local sentinel = {}
+function require( name )
+    if type( name ) ~= "string" then
+        error( "bad argument #1 (expected string, got " .. type( name ) .. ")", 2 )
+    end
+    if pack.loaded[name] == sentinel then
+        error("Loop detected requiring '" .. name .. "'", 0)
+    end
+    if pack.loaded[name] then
+        return pack.loaded[name]
+    end
+
+    local sError = "Error loading module '" .. name .. "':"
+    for n,searcher in ipairs(pack.loaders) do
+        local loader, err = searcher(name)
+        if loader then
+            pack.loaded[name] = sentinel
+            local result = loader( err )
+            if result ~= nil then
+                pack.loaded[name] = result
+                return result
+            else
+                pack.loaded[name] = true
+                return true
+            end
+        else
+            sError = sError .. "\n" .. err
+        end
+    end
+    error(sError, 2)
+end
 
 function shell.exit()
     running = false
@@ -532,6 +665,15 @@ local function execv(tokens)
         vars["?"] = builtins[path](table.unpack(tokens))
         if vars["?"] == nil or vars["?"] == true then vars["?"] = 0 
         elseif vars["?"] == false then vars["?"] = 1 end
+    elseif functions[path] ~= nil then
+        local oldargs = args
+        args = tokens
+        function_running = true
+        for k,v in ipairs(functions[path]) do 
+            shell.run(v) 
+            if not function_running then break end
+        end
+        args = oldargs
     else
         if not fs.exists(path) then
             printError("cash: " .. path .. ": No such file or directory")
@@ -550,7 +692,7 @@ local function execv(tokens)
         end
         local _old = vars._
         vars._ = path
-        run(setmetatable({shell = shell}, {__index = _ENV}), path, table.unpack(tokens)) 
+        run(setmetatable({shell = shell, package = pack, require = require}, {__index = _ENV}), path, table.unpack(tokens)) 
         vars._ = _old
     end
     for k,v in pairs(tokens.vars) do _ENV[k] = oldenv[k] end
@@ -564,7 +706,11 @@ end
 function shell.run(...)
     local cmd = table.concat({...}, " ")
     if cmd == "" or string.sub(cmd, 1, 1) == "#" then return end
-    if while_statement > 0 then
+    if function_name ~= nil then
+        if string.find(cmd, "}") then function_name = nil
+        else table.insert(functions[function_name], cmd) end
+        return true
+    elseif while_statement > 0 then
         local tokens = splitSemicolons(cmd)
         for k,line in ipairs(tokens) do 
             line = string.sub(line, #string.match(line, "^ *") + 1)

@@ -2,7 +2,6 @@
 A Bourne-compatible shell for ComputerCraft. WIP.
 
 ### TODO
-* Add control statements (while, for, switch)
-* Fix semicolon parsing
-* Finish implementing some stuff
-* Ensure compatibility with CraftOS shell
+* Add rest of control statements (for, switch)
+* Add functions
+* Add require/package

@@ -49,6 +49,10 @@ local completion = topshell and topshell.getCompletionInfo() or {}
 local if_table, if_statement = {}, 0
 local while_table, while_statement = {}, 0
 local case_table, case_statement = {}, 0
+local function_name = nil
+local history = {}
+local historyfile
+local run_tokens
 
 local builtins = {
     echo = function(...) print(...); return 0 end,
@@ -76,6 +80,17 @@ local builtins = {
             end
         end
     end,
+    history = function(...)
+        if ({...})[1] == "-c" then
+            historyfile.close()
+            historyfile = fs.open(kernel and "/~/.cash_history" or ".cash_history", "w")
+            history = {}
+            return
+        end
+        local lines = {}
+        for k,v in ipairs(history) do lines[k] = {k, v} end
+        textutils.tabulate(table.unpack(lines))
+    end,
     pwd = function() print(PWD) end,
     read = function(var) -- TODO: expand
         vars[var] = read()
@@ -100,14 +115,18 @@ local builtins = {
     end,
     test = function(...) -- TODO: add and/or
         local args = {...}
+        if #args < 1 then
+            printError("cash: test: unary operator expected")
+            return -1
+        end
         local function n(v) return v end
         if args[1] == "!" then
             table.remove(args, 1)
             n = function(v) return not v end
         end
         if string.sub(args[1], 1, 1) == "-" then
-            if args[2] == nil then  end
-            if args[1] == "-d" then return n(fs.exists(shell.resolve(args[2])) and fs.isDir(shell.resolve(args[2])))
+            if args[2] == nil then return n(true)
+            elseif args[1] == "-d" then return n(fs.exists(shell.resolve(args[2])) and fs.isDir(shell.resolve(args[2])))
             elseif args[1] == "-e" then return n(fs.exists(shell.resolve(args[2])))
             elseif args[1] == "-f" then return n(fs.exists(shell.resolve(args[2])) and not fs.isDir(shell.resolve(args[2])))
             elseif args[1] == "-n" then return n(#args[2] > 0)
@@ -117,7 +136,7 @@ local builtins = {
             elseif args[1] == "-x" then return n(true)
             elseif args[1] == "-z" then return n(#args[2] == 0)
             else return n(false) end
-        elseif string.sub(args[2], 1, 1) == "-" then
+        elseif args[3] and string.sub(args[2], 1, 1) == "-" then
             if args[2] == "-eq" then return n(tonumber(args[1]) == tonumber(args[3]))
             elseif args[2] == "-ne" then return n(tonumber(args[1]) ~= tonumber(args[3]))
             elseif args[2] == "-lt" then return n(tonumber(args[1]) < tonumber(args[3]))
@@ -128,7 +147,7 @@ local builtins = {
         elseif args[2] == "=" then return n(args[1] == args[3])
         elseif args[2] == "!=" then return n(args[1] ~= args[3])
         else
-            printError("cash: test: expected unary operator")
+            printError("cash: test: unary operator expected")
             return 2
         end
     end,
@@ -180,6 +199,33 @@ local builtins = {
         end
         table.remove(if_table, if_statement)
         if_statement = if_statement - 1
+    end,
+    ["while"] = function(...)
+        table.insert(while_table, {cond = {...}, lines = {}})
+    end,
+    ["do"] = function(...)
+        if table.maxn(while_table) == 0 then
+            printError("cash: syntax error near unexpected token `do'")
+            return -1
+        end
+        while_statement = while_statement + 1
+    end,
+    done = function()
+        if while_statement < 1 then
+            printError("cash: syntax error near unexpected token `done'")
+            return -1
+        end
+        while_statement = while_statement - 1
+        if while_statement == 0 then
+            local last = table.remove(while_table, while_statement + 1)
+            shell.run(table.unpack(last.cond))
+            local cond = vars["?"]
+            while cond == 0 do
+                for k,v in ipairs(last.lines) do shell.run(v) end
+                shell.run(table.unpack(last.cond))
+                cond = vars["?"]
+            end
+        end
     end
 }
 builtins["["] = builtins.test
@@ -278,6 +324,13 @@ local function expandVar(var)
         local varname = string.sub(string.match(var, "%b{}"), 2, -2)
         local retval = _ENV[varname] or vars[varname]
         if type(retval) == "function" then return retval(), #varname + 2 else return retval or "", #varname + 2 end
+    elseif string.sub(var, 2, 3) == "((" then
+        local expr = string.gsub(string.sub(string.match(string.sub(var, 3), "%b()"), 2, -2), "%$", "")
+        local fn = loadstring("return " .. expr)
+        local varenv = setmetatable({}, {__index = _ENV})
+        for k,v in pairs(vars) do varenv[k] = v end
+        setfenv(fn, varenv)
+        return tostring(fn()), #expr + 4
     elseif tonumber(string.sub(var, 2, 2)) then
         local varname = tonumber(string.match(string.sub(var, 2, 2), "[0-9]+"))
         if varname == 0 then return vars["0"], 1 else return args[varname] or "", math.floor(math.log10(varname)) + 1 end
@@ -295,7 +348,28 @@ local function expandVar(var)
     end
 end
 
-local function tokenize(cmdline)
+local function splitSemicolons(cmdline)
+    local escape = false
+    local quoted = false
+    local j = 1
+    local retval = {""}
+    for c in string.gmatch(cmdline, ".") do
+        local setescape = false
+        if c == '"' or c == '\'' and not escape then quoted = not quoted
+        elseif c == '\\' and not quoted and not escape then 
+            setescape = true
+            escape = true
+        end
+        if c == ';' and not quoted and not escape then
+            j=j+1
+            retval[j] = ""
+        elseif not (c == ' ' and retval[j] == "") then retval[j] = retval[j] .. c end
+        if not setescape then escape = false end
+    end
+    return retval
+end
+
+local function tokenize(cmdline, noexpand)
     -- Expand vars
     local singleQuote = false
     local escape = false
@@ -308,45 +382,58 @@ local function tokenize(cmdline)
         elseif type(v) == "string" then return v
         else return tostring(v) end
     end
-    while i <= #cmdline do
-        local c = string.sub(cmdline, i, i)
-        if c == '$' and not escape and not singleQuote then
-            local s, n = expandVar(string.sub(cmdline, i))
-            s = tostr(s)
-            expstr = expstr .. s
-            i = i + n
-        else
-            if c == '\'' and not escape then singleQuote = not singleQuote end
-            escape = c == '\\' and not escape
-            expstr = expstr .. c
+    if noexpand then expstr = cmdline else
+        while i <= #cmdline do
+            local c = string.sub(cmdline, i, i)
+            if c == '$' and not escape and not singleQuote then
+                local s, n = expandVar(string.sub(cmdline, i))
+                s = tostr(s)
+                expstr = expstr .. s
+                i = i + n
+            else
+                if c == '\'' and not escape then singleQuote = not singleQuote end
+                escape = c == '\\' and not escape
+                expstr = expstr .. c
+            end
+            i=i+1
         end
-        i=i+1
     end
     -- Tokenize
-    local retval = {[0] = ""}
+    local retval = {{[0] = ""}}
     i = 0
+    local j = 1
     local quoted = false
     escape = false
     for c in string.gmatch(expstr, ".") do
         if c == '"' or c == '\'' and not escape then quoted = not quoted
         elseif c == '\\' and not quoted and not escape then escape = true
         elseif c == ' ' and not quoted and not escape then
-            i=i+1
-            retval[i] = ""
+            if #retval[j][i] > 0 then
+                i=i+1
+                retval[j][i] = ""
+            end
+        elseif c == ';' and not quoted and not escape then
+            j=j+1
+            i=0
+            retval[j] = {[0] = ""}
         else 
-            retval[i] = retval[i] .. c 
+            retval[j][i] = retval[j][i] .. c 
             escape = false
         end
     end
-    local path, islocal = shell.resolveProgram(retval[0])
-    path = path or retval[0]
-    if not (islocal and string.find(retval[0], "/") == nil) then retval[0] = path end
-    retval.vars = {}
-    if #retval > 1 then
-        while retval[0] and string.find(retval[0], "=") do
-            retval.vars[string.sub(retval[0], 1, string.find(retval[0], "=") - 1)] = string.sub(retval[0], string.find(retval[0], "=") + 1)
-            retval[0] = nil
-            for i = 1, table.maxn(retval) do retval[i-1] = retval[i] end
+    for k,v in ipairs(retval) do
+        local path, islocal = shell.resolveProgram(v[0])
+        path = path or v[0]
+        if not (islocal and string.find(v[0], "/") == nil) then v[0] = path end
+        v.vars = {}
+        if #v > 1 then
+            while v[0] and string.find(v[0], "=") do
+                local l = string.sub(v[0], 1, string.find(v[0], "=") - 1)
+                v.vars[l] = string.sub(v[0], string.find(v[0], "=") + 1)
+                v.vars[l] = tonumber(v.vars[l]) or v.vars[l]
+                v[0] = nil
+                for i = 1, table.maxn(v) do v[i-1] = v[i] end
+            end
         end
     end
     return retval
@@ -369,7 +456,7 @@ local function dayToString(day)
 end
 
 local function getPrompt()
-    local retval = vars.PS1
+    local retval = (if_statement > 0 or while_statement > 0 or case_statement > 0) and vars.PS2 or vars.PS1
     for k,v in pairs({
         ["\\d"] = dayToString(os.day()),
         ["\\h"] = string.sub(os.getComputerLabel(), 1, string.find(os.getComputerLabel(), "%.")),
@@ -428,8 +515,11 @@ end
 local function execv(tokens)
     local path = tokens[0]
     tokens[0] = nil
+    if path == nil then return end
     if #tokens == 0 and string.find(path, "=") ~= nil then
-        vars[string.sub(path, 1, string.find(path, "=") - 1)] = string.sub(path, string.find(path, "=") + 1)
+        local k = string.sub(path, 1, string.find(path, "=") - 1)
+        vars[k] = string.sub(path, string.find(path, "=") + 1)
+        vars[k] = tonumber(vars[k]) or vars[k]
         return
     end
     local oldenv = {}
@@ -443,6 +533,21 @@ local function execv(tokens)
         if vars["?"] == nil or vars["?"] == true then vars["?"] = 0 
         elseif vars["?"] == false then vars["?"] = 1 end
     else
+        if not fs.exists(path) then
+            printError("cash: " .. path .. ": No such file or directory")
+            vars["?"] = -1
+            return
+        end
+        if not kernel then
+            local file = fs.open(path, "r")
+            local firstLine = file.readLine()
+            file.close()
+            if string.sub(firstLine, 1, 2) == "#!" then
+                table.insert(tokens, 1, path)
+                path = string.sub(firstLine, 3)
+                if not fs.exists(path) and fs.exists(path .. ".lua") then path = path .. ".lua" end
+            end
+        end
         local _old = vars._
         vars._ = path
         run(setmetatable({shell = shell}, {__index = _ENV}), path, table.unpack(tokens)) 
@@ -451,13 +556,25 @@ local function execv(tokens)
     for k,v in pairs(tokens.vars) do _ENV[k] = oldenv[k] end
 end
 
+run_tokens = function(tokens)
+    for k,tok in ipairs(tokens) do if tok[0] ~= "" then execv(tok) end end
+    return vars["?"] == 0
+end
+
 function shell.run(...)
     local cmd = table.concat({...}, " ")
-    if cmd == "" then return end
-    --for cmd in string.gmatch(str, "[^;]+") do
-        cmd = string.sub(cmd, string.find(cmd, "[^ ]"), nil)
-        if string.sub(cmd, 1, 1) ~= "#" then execv(tokenize(cmd)) end
-    --end
+    if cmd == "" or string.sub(cmd, 1, 1) == "#" then return end
+    if while_statement > 0 then
+        local tokens = splitSemicolons(cmd)
+        for k,line in ipairs(tokens) do 
+            line = string.sub(line, #string.match(line, "^ *") + 1)
+            if line == "do" or line == "done" or string.find(line, "^do ") or string.find(line, "^done ") then run_tokens(tokenize(line)) end
+            if while_statement > 0 then table.insert(while_table[1].lines, line) end
+        end
+        return true
+    end
+    local lines = splitSemicolons(cmd)
+    for k,v in ipairs(lines) do run_tokens(tokenize(v, string.sub(v, 1, 6) == "while ")) end
     return vars["?"] == 0
 end
 
@@ -480,12 +597,24 @@ if kernel then
         for line in file:lines() do shell.run(line) end
         file:close()
     end
+    if fs.exists("/~/.cash_history") then
+        local file = io.open("/~/.cash_history", "r")
+        for line in file:lines() do table.insert(history, line) end
+        file:close()
+        historyfile = fs.open("/~/.cash_history", "a")
+    else historyfile = fs.open("/~/.cash_history", "w") end
 else
     if fs.exists(".cashrc") then
         local file = io.open(".cashrc", "r")
         for line in file:lines() do shell.run(line) end
         file:close()
     end
+    if fs.exists(".cash_history") then
+        local file = io.open(".cash_history", "r")
+        for line in file:lines() do table.insert(history, line) end
+        file:close()
+        historyfile = fs.open(".cash_history", "a")
+    else historyfile = fs.open(".cash_history", "w") end
 end
 
 local function ansiWrite(str)
@@ -558,7 +687,6 @@ local function ansiWrite(str)
     end
 end
 
-local history = {}
 local function readCommand()
     ansiWrite(getPrompt())
     local str = ""
@@ -622,7 +750,8 @@ local function readCommand()
                 coff = coff - 1
                 waitTab = false
             elseif ev[2] == keys.tab and coff == #str then
-                local tokens = tokenize(str)
+                local tokens = tokenize(str)[1]
+                -- FIX THIS
                 if completion[tokens[0]] ~= nil then
                     local t = {}
                     for i = 1, table.maxn(tokens) - 1 do t[i] = tokens[i] end
@@ -709,8 +838,13 @@ local function readCommand()
     end
     print("")
     term.setCursorBlink(false)
-    if str ~= "" then table.insert(history, str) end
+    if str ~= "" then 
+        table.insert(history, str) 
+        historyfile.writeLine(str)
+        historyfile.flush()
+    end
     return str
 end
 
 while running do shell.run(readCommand()) end
+historyfile.close()

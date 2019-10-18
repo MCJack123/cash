@@ -164,7 +164,11 @@ local builtins = {
     lua = function(...)
         if #({...}) > 0 then 
             local f, err = loadstring("return " .. table.concat({...}, " "))
-            if f then print(pcall(f)) else printError(err) end 
+            if f then 
+                local r = {pcall(f)}
+                table.remove(r, 1)
+                print(table.unpack(r))
+            else printError(err) end 
         else shell.run("/rom/programs/lua.lua") end
     end,
     cat = function(...)

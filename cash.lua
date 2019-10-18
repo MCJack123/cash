@@ -726,7 +726,8 @@ end
 
 if args[1] ~= nil then
     local path = table.remove(args, 1)
-    local file = io.open(shell.resolve(path), "r")
+    path = fs.exists(path) and path or shell.resolve(path)
+    local file = io.open(path, "r")
     for line in file:lines() do shell.run(line) end
     file:close()
     return

@@ -33,6 +33,7 @@ _G.require = nil
 local start_time = os.epoch()
 local args = {...}
 local running = true
+local shell_retval = 0
 
 local function splitFile(filename)
     local file = io.open(filename, "r")
@@ -68,7 +69,7 @@ local vars = {
     ["?"] = 0,
     ["0"] = topshell and topshell.getRunningProgram(),
     _ = topshell and topshell.getRunningProgram(),
-    LINENUM = 1,
+    ["$"] = kernel and kernel.getPID() or 0,
 }
 
 local aliases = topshell and topshell.aliases() or {}
@@ -82,9 +83,26 @@ local history = {}
 local historyfile
 local run_tokens
 local function_running = false
+local should_break = false
+local no_funcs = false
 local dirstack = {}
+local jobs = {}
+local completed_jobs = {}
 
 local builtins = {
+    [":"] = function() return 0 end,
+    ["."] = function(path)
+        path = fs.exists(path) and path or shell.resolve(path)
+        local file = io.open(path, "r")
+        if not file then return 1 end
+        vars.LINENUM = 1
+        for line in file:lines() do 
+            shell.run(line) 
+            vars.LINENUM = vars.LINENUM + 1
+        end
+        vars.LINENUM = nil
+        file:close()
+    end,
     echo = function(...) print(...); return 0 end,
     builtin = function(name, ...) return builtin[name](...) end,
     cd = function(dir)
@@ -95,7 +113,7 @@ local builtins = {
         OLDPWD = PWD
         PWD = shell.resolve(dir or "/") 
     end,
-    command = function(...) shell.run(...); return vars["?"] end,
+    command = function(...) no_funcs = true; shell.run(...); no_funcs = false; return vars["?"] end,
     complete = function() end, -- TODO
     dirs = function() print(PWD) end,
     eval = function(...) shell.run(...); return vars["?"] end,
@@ -120,6 +138,15 @@ local builtins = {
         local lines = {}
         for k,v in ipairs(history) do print(" " .. k .. string.rep(" ", math.floor(math.log10(#history)) - math.floor(math.log10(k)) + 2) .. v) end
         --textutils.tabulate(table.unpack(lines))
+    end,
+    jobs = function(...)
+        local filter = {...}
+        for k,v in pairs(jobs) do 
+            if #filter == 0 then print("[" .. k .. "]+  Running  " .. v.cmd) 
+            else for l,w in ipairs(filter) do 
+                if k == w then print("[" .. k .. "]+  Running  " .. v.cmd) end 
+            end end 
+        end
     end,
     pushd = function(newdir)
         table.insert(dirstack, PWD)
@@ -165,6 +192,7 @@ local builtins = {
             end
         end
     end,
+    sleep = function(time) sleep(tonumber(time)) end,
     test = function(...) -- TODO: add and/or
         local args = {...}
         if #args < 1 then
@@ -207,6 +235,10 @@ local builtins = {
     ["false"] = function() return 1 end,
     unalias = function(...) for k,v in ipairs({...}) do alias[v] = nil end end,
     unset = function(...) for k,v in ipairs({...}) do vars[v] = nil end end,
+    wait = function(job)
+        if job then while jobs[tonumber(job)] ~= nil do sleep(0.1) end
+        else while table.maxn(jobs) ~= 0 do sleep(0.1) end end
+    end,
     lua = function(...)
         if #({...}) > 0 then 
             local f, err = loadstring("return " .. table.concat({...}, " "))
@@ -279,7 +311,8 @@ local builtins = {
             if type(last.cond) == "function" then last.cond()
             else shell.run(table.unpack(last.cond)) end
             local cond = vars["?"]
-            while cond == 0 do
+            should_break = false
+            while cond == 0 and not should_break do
                 for k,v in ipairs(last.lines) do 
                     if type(v) == "function" then v()
                     else shell.run(v) end
@@ -290,6 +323,7 @@ local builtins = {
             end
         end
     end,
+    ["break"] = function() should_break = true end,
     ["for"] = function(...)
         local args = {...}
         if args[2] ~= "in" then
@@ -413,8 +447,9 @@ function require( name )
     error(sError, 2)
 end
 
-function shell.exit()
+function shell.exit(retval)
     running = false
+    shell_retval = retval or 0
 end
 
 function shell.dir()
@@ -599,6 +634,11 @@ local function tokenize(cmdline, noexpand)
             j=j+1
             i=0
             retval[j] = {[0] = ""}
+        elseif c == '&' and not quoted and not escape then
+            retval[j].async = true
+            j=j+1
+            i=0
+            retval[j] = {[0] = ""}
         else 
             retval[j][i] = retval[j][i] .. c 
             escape = false
@@ -715,7 +755,7 @@ local function execv(tokens)
         vars["?"] = builtins[path](table.unpack(tokens))
         if vars["?"] == nil or vars["?"] == true then vars["?"] = 0 
         elseif vars["?"] == false then vars["?"] = 1 end
-    elseif functions[path] ~= nil then
+    elseif functions[path] ~= nil and not no_funcs then
         local oldargs = args
         args = tokens
         function_running = true
@@ -749,7 +789,16 @@ local function execv(tokens)
 end
 
 run_tokens = function(tokens)
-    for k,tok in ipairs(tokens) do if tok[0] ~= "" then execv(tok) end end
+    for k,tok in ipairs(tokens) do if tok[0] ~= "" then 
+        if tok.async then
+            local coro, pid
+            if kernel then pid = kernel.fork(tok[0], function() execv(tok) end)
+            else coro = coroutine.create(function() execv(tok) end) end
+            local id = #jobs + 1
+            jobs[id] = {cmd = tok[0] .. " " .. table.concat(tok, " "), coro = coro, pid = pid}
+            print("[" .. (id) .. "] " .. (pid or ""))
+        else execv(tok) end
+    end end
     return vars["?"] == 0
 end
 
@@ -778,9 +827,14 @@ if args[1] ~= nil then
     local path = table.remove(args, 1)
     path = fs.exists(path) and path or shell.resolve(path)
     local file = io.open(path, "r")
-    for line in file:lines() do shell.run(line) end
-    file:close()
-    return
+    if not file then return 1 end
+    vars.LINENUM = 1
+    for line in file:lines() do 
+        shell.run(line) 
+        vars.LINENUM = vars.LINENUM + 1
+    end
+    vars.LINENUM = nil
+    return shell_retval
 end
 
 if kernel then
@@ -789,15 +843,16 @@ if kernel then
         for line in file:lines() do shell.run(line) end
         file:close()
     end
+    local function lines(file) return function() return file.readLine() end end
     if fs.exists("/~/.cashrc") then
-        local file = io.open("/~/.cashrc", "r")
-        for line in file:lines() do shell.run(line) end
-        file:close()
+        local file = fs.open("/~/.cashrc", "r")
+        for line in lines(file) do shell.run(line) end
+        file.close()
     end
     if fs.exists("/~/.cash_history") then
-        local file = io.open("/~/.cash_history", "r")
-        for line in file:lines() do table.insert(history, line) end
-        file:close()
+        local file = fs.open("/~/.cash_history", "r")
+        for line in lines(file) do table.insert(history, line) end
+        file.close()
         historyfile = fs.open("/~/.cash_history", "a")
     else historyfile = fs.open("/~/.cash_history", "w") end
 else
@@ -1043,5 +1098,45 @@ local function readCommand()
     return str
 end
 
-while running do shell.run(readCommand()) end
+local function jobManager()
+    while running do
+        if kernel then
+            local e = {os.pullEventRaw()}
+            if e[1] == "process_complete" then
+                for k,v in pairs(jobs) do if v.pid == e[2] then 
+                    jobs[k] = nil
+                    completed_jobs[k] = {err = "Done", cmd = v.cmd}
+                    break
+                end end
+            end
+        else
+            local delete = {}
+            local e = {os.pullEventRaw()}
+            for k,v in pairs(jobs) do
+                if v.filter == nil or v.filter == e[1] then
+                    local ok, filter = coroutine.resume(v.coro, table.unpack(e))
+                    if coroutine.status(v.coro) == "dead" then
+                        table.insert(delete, k)
+                        completed_jobs[k] = {err = "Done", cmd = v.cmd}
+                    elseif not ok then
+                        table.insert(delete, k)
+                        completed_jobs[k] = {err = filter, cmd = v.cmd}
+                    end
+                    v.filter = filter
+                    
+                end
+            end
+            for k,v in ipairs(delete) do jobs[k] = nil end
+        end
+    end
+end
+
+parallel.waitForAny(function()
+    while running do 
+        for k,v in pairs(completed_jobs) do print("[" .. k .. "]+  " .. v.err .. "  " .. v.cmd) end
+        completed_jobs = {}
+        shell.run(readCommand()) 
+    end
+end, jobManager)
 historyfile.close()
+return shell_retval

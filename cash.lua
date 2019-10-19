@@ -24,6 +24,7 @@ SOFTWARE.
 
 local topshell = _ENV.shell
 local shell = {}
+local multishell = {}
 local pack = {}
 _ENV.package = nil
 _G.package = nil
@@ -34,6 +35,7 @@ local start_time = os.epoch()
 local args = {...}
 local running = true
 local shell_retval = 0
+local shell_title = nil
 
 local function splitFile(filename)
     local file = io.open(filename, "r")
@@ -389,7 +391,7 @@ pack.loaders = {
                 sPath = fs.combine(PWD, sPath)
             end
             if fs.exists(sPath) and not fs.isDir(sPath) then
-                local fnFile, sError = loadfile( sPath, setmetatable({shell = shell, package = pack, require = require}, {__index = _ENV}) )
+                local fnFile, sError = loadfile( sPath, setmetatable({shell = shell, multishell = multishell, package = pack, require = require}, {__index = _ENV}) )
                 if fnFile then
                     return fnFile, sPath
                 else
@@ -534,6 +536,32 @@ end
 
 function shell.getCompletionInfo()
     return completion
+end
+
+function shell.switchTab() end
+
+function multishell.getCurrent()
+    return 1
+end
+
+function multishell.getCount()
+    return 1
+end
+
+function multishell.setFocus(id)
+    return id == 1
+end
+
+function multishell.setTitle(title) 
+    shell_title = title   
+end
+
+function multishell.getTitle()
+    return shell_title
+end
+
+function multishell.getFocus()
+    return 1
 end
 
 local function expandVar(var)
@@ -782,7 +810,7 @@ local function execv(tokens)
         end
         local _old = vars._
         vars._ = path
-        run(setmetatable({shell = shell, package = pack, require = require}, {__index = _ENV}), path, table.unpack(tokens)) 
+        run(setmetatable({shell = shell, multishell = multishell, package = pack, require = require}, {__index = _ENV}), path, table.unpack(tokens)) 
         vars._ = _old
     end
     for k,v in pairs(tokens.vars) do _ENV[k] = oldenv[k] end
@@ -820,6 +848,47 @@ function shell.run(...)
     end
     local lines = splitSemicolons(cmd)
     for k,v in ipairs(lines) do run_tokens(tokenize(v, string.sub(v, 1, 6) == "while ")) end
+    return vars["?"] == 0
+end
+
+function multishell.launch(environment, path, ...)
+    local coro, pid
+    local tok = {[0] = path, ...}
+    if kernel then pid = kernel.fork(path, function() execv(tok) end)
+    else coro = coroutine.create(function() execv(tok) end) end
+    local id = #jobs + 1
+    jobs[id] = {cmd = path .. " " .. table.concat({...}, " "), coro = coro, pid = pid}
+    return id
+end
+
+function shell.openTab(...)
+    local cmd = table.concat({...}, " ")
+    if cmd == "" or string.sub(cmd, 1, 1) == "#" then return end
+    if function_name ~= nil then
+        if string.find(cmd, "}") then function_name = nil
+        else table.insert(functions[function_name], cmd) end
+        return true
+    elseif while_statement > 0 then
+        local tokens = splitSemicolons(cmd)
+        for k,line in ipairs(tokens) do 
+            line = string.sub(line, #string.match(line, "^ *") + 1)
+            if line == "do" or line == "done" or string.find(line, "^do ") or string.find(line, "^done ") then run_tokens(tokenize(line)) end
+            if while_statement > 0 then table.insert(while_table[1].lines, line) end
+        end
+        return true
+    end
+    local lines = splitSemicolons(cmd)
+    for k,v in ipairs(lines) do 
+        tokens = tokenize(v, string.sub(v, 1, 6) == "while ")
+        for k,tok in ipairs(tokens) do if tok[0] ~= "" then 
+            local coro, pid
+            if kernel then pid = kernel.fork(tok[0], function() execv(tok) end)
+            else coro = coroutine.create(function() execv(tok) end) end
+            local id = #jobs + 1
+            jobs[id] = {cmd = tok[0] .. " " .. table.concat(tok, " "), coro = coro, pid = pid}
+            print("[" .. (id) .. "] " .. (pid or ""))
+        end end
+    end
     return vars["?"] == 0
 end
 

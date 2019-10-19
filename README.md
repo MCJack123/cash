@@ -23,3 +23,6 @@ A Bourne-compatible shell for ComputerCraft.
 ### TODO
 * Add case statement
 * Fix environment variables in _ENV
+
+## License
+This project is licensed under the MIT license. You are free to modify and redistribute cash.lua as long as the copyright notice is preserved at the top of the script.

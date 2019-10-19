@@ -652,8 +652,7 @@ local function tokenize(cmdline, noexpand)
     local quoted = false
     escape = false
     for c in string.gmatch(expstr, ".") do
-        if c == '"' or c == '\'' and not escape then quoted = not quoted
-        elseif c == '\\' and not quoted and not escape then escape = true
+        if (c == '"' or c == '\'') and not escape then quoted = not quoted
         elseif c == ' ' and not quoted and not escape then
             if #retval[j][i] > 0 then
                 i=i+1
@@ -668,10 +667,10 @@ local function tokenize(cmdline, noexpand)
             j=j+1
             i=0
             retval[j] = {[0] = ""}
-        else 
+        elseif not (c == '\\' and not quoted and not escape) then
             retval[j][i] = retval[j][i] .. c 
-            escape = false
         end
+        escape = c == '\\' and not quoted and not escape
     end
     for k,v in ipairs(retval) do
         local path, islocal = shell.resolveProgram(v[0])

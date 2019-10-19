@@ -82,6 +82,7 @@ local history = {}
 local historyfile
 local run_tokens
 local function_running = false
+local dirstack = {}
 
 local builtins = {
     echo = function(...) print(...); return 0 end,
@@ -117,8 +118,30 @@ local builtins = {
             return
         end
         local lines = {}
-        for k,v in ipairs(history) do lines[k] = {k, v} end
-        textutils.tabulate(table.unpack(lines))
+        for k,v in ipairs(history) do print(" " .. k .. string.rep(" ", math.floor(math.log10(#history)) - math.floor(math.log10(k)) + 2) .. v) end
+        --textutils.tabulate(table.unpack(lines))
+    end,
+    pushd = function(newdir)
+        table.insert(dirstack, PWD)
+        if newdir then PWD = shell.resolve(newdir) end
+        write((PWD == "" and "/" or PWD) .. " ")
+        for i = #dirstack, 1, -1 do write((dirstack[i] == "" and "/" or dirstack[i]) .. " ") end
+        print()
+    end,
+    popd = function()
+        if #dirstack == 0 then
+            printError("cash: popd: directory stack empty")
+            return -1
+        end
+        PWD = table.remove(dirstack, #dirstack)
+        write((PWD == "" and "/" or PWD) .. " ")
+        for i = #dirstack, 1, -1 do write((dirstack[i] == "" and "/" or dirstack[i]) .. " ") end
+        print()
+    end,
+    dirs = function()
+        write((PWD == "" and "/" or PWD) .. " ")
+        for i = #dirstack, 1, -1 do write((dirstack[i] == "" and "/" or dirstack[i]) .. " ") end
+        print()
     end,
     pwd = function() print(PWD) end,
     read = function(var) -- TODO: expand
@@ -180,6 +203,8 @@ local builtins = {
             return 2
         end
     end,
+    ["true"] = function() return 0 end,
+    ["false"] = function() return 1 end,
     unalias = function(...) for k,v in ipairs({...}) do alias[v] = nil end end,
     unset = function(...) for k,v in ipairs({...}) do vars[v] = nil end end,
     lua = function(...)

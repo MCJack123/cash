@@ -126,7 +126,7 @@ local builtins = {
         if #vars == 0 or vars[1] == "-p" then for k,v in pairs(_ENV) do if type(v) == "string" or type(v) == "number" then print("export " .. k .. "=" .. v) end end else
             for k,v in ipairs(vars) do
                 local kk, vv = string.match(v, "(.+)=(.+)")
-                if _ENV[kk] == nil or type(_ENV[kk]) == "string" or type(_ENV[kk]) == "number" then _ENV[kk] = vv end
+                if not (kk == nil or vv == nil) and (_ENV[kk] == nil or type(_ENV[kk]) == "string" or type(_ENV[kk]) == "number") then _ENV[kk] = vv end
             end
         end
     end,
@@ -245,6 +245,7 @@ local builtins = {
         if #({...}) > 0 then 
             local f, err = loadstring("return " .. table.concat({...}, " "))
             if f then 
+                setfenv(f, setmetatable({shell = shell, multishell = multishell, package = pack, require = require}, {__index = _ENV}))
                 local r = {pcall(f)}
                 table.remove(r, 1)
                 print(table.unpack(r))
@@ -739,7 +740,6 @@ local function run( _tEnv, _sPath, ... )
     end
     local tArgs = table.pack( ... )
     local tEnv = _tEnv
-    setmetatable( tEnv, { __index = _G } )
     local fnFile, err = loadfile( _sPath, tEnv )
     if fnFile then
         local ok, err = pcall( function()

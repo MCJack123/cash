@@ -603,7 +603,12 @@ local function splitSemicolons(cmdline)
     local quoted = false
     local j = 1
     local retval = {""}
+    local lastc, lastc2
     for c in string.gmatch(cmdline, ".") do
+        if lastc == '&' and c ~= '&' and lastc2 ~= '&' and not quoted and not escape then
+            j=j+1
+            retval[j] = ""
+        end
         local setescape = false
         if c == '"' or c == '\'' and not escape then quoted = not quoted
         elseif c == '\\' and not quoted and not escape then 
@@ -615,6 +620,8 @@ local function splitSemicolons(cmdline)
             retval[j] = ""
         elseif not (c == ' ' and retval[j] == "") then retval[j] = retval[j] .. c end
         if not setescape then escape = false end
+        lastc2 = lastc
+        lastc = c
     end
     return retval
 end
@@ -654,6 +661,7 @@ local function tokenize(cmdline, noexpand)
     local j = 1
     local quoted = false
     escape = false
+    local lastc
     for c in string.gmatch(expstr, ".") do
         if (c == '"' or c == '\'') and not escape then quoted = not quoted
         elseif c == ' ' and not quoted and not escape then
@@ -665,16 +673,23 @@ local function tokenize(cmdline, noexpand)
             j=j+1
             i=0
             retval[j] = {[0] = ""}
-        elseif c == '&' and not quoted and not escape then
-            retval[j].async = true
+        elseif lastc == '&' and c == '&' and not quoted and not escape then
+            retval[j][i] = string.sub(retval[j][i], 1, -2)
             j=j+1
             i=0
-            retval[j] = {[0] = ""}
+            retval[j] = {[0] = "", last = 0}
+        elseif lastc == '|' and c == '|' and not quoted and not escape then
+            retval[j][i] = string.sub(retval[j][i], 1, -2)
+            j=j+1
+            i=0
+            retval[j] = {[0] = "", last = 1}
         elseif not (c == '\\' and not quoted and not escape) then
             retval[j][i] = retval[j][i] .. c 
         end
         escape = c == '\\' and not quoted and not escape
+        lastc = c
     end
+    if lastc == '&' then retval.async = true end
     for k,v in ipairs(retval) do if v[0] ~= "" then
         local path, islocal = shell.resolveProgram(v[0])
         path = path or v[0]
@@ -818,32 +833,31 @@ local function execv(tokens)
     for k,v in pairs(tokens.vars) do _ENV[k] = oldenv[k] end
 end
 
-run_tokens = function(tokens)
-    for k,tok in ipairs(tokens) do if trim(tok[0]) ~= "" then 
-        if tok.async then
-            local coro, pid
-            if kernel then pid = kernel.fork(tok[0], function() execv(tok) end)
-            else coro = coroutine.create(function() execv(tok) end) end
-            local id = #jobs + 1
-            jobs[id] = {cmd = tok[0] .. " " .. table.concat(tok, " "), coro = coro, pid = pid, isfg = false, start = true}
-            print("[" .. (id) .. "] " .. (pid or ""))
-        else execv(tok) end
-    end end
+run_tokens = function(tokens, isAsync)
+    if tokens.async and not isAsync then
+        local coro, pid
+        if kernel then pid = kernel.fork(tok[0], function() run_tokens(tokens, true) end)
+        else coro = coroutine.create(function() run_tokens(tokens, true) end) end
+        local id = #jobs + 1
+        jobs[id] = {cmd = tokens[1][0] .. " " .. table.concat(tokens[1], " "), coro = coro, pid = pid, isfg = false, start = true}
+        print("[" .. (id) .. "] " .. (pid or ""))
+    else
+        for k,tok in ipairs(tokens) do if trim(tok[0]) ~= "" then 
+            if (tok.last == 0 and vars["?"] == 0) or (tok.last == 1 and vars["?"] ~= 0) or tok.last == nil then
+                execv(tok) 
+            end
+        end end
+    end
     return vars["?"] == 0
 end
 
 run_tokens_async = function(tokens)
-    for k,tok in ipairs(tokens) do if trim(tok[0]) ~= "" then 
-        if tok[0] == "exec" then execv(tok) else
-            local coro, pid
-            if kernel then pid = kernel.fork(tok[0], function() execv(tok) end)
-            else coro = coroutine.create(function() execv(tok) end) end
-            local id = #jobs + 1
-            jobs[id] = {cmd = tok[0] .. " " .. table.concat(tok, " "), coro = coro, pid = pid, isfg = not tok.async, start = true}
-            if tok.async then print("[" .. (id) .. "] " .. (pid or "")) end
-        end
-    end end
-    return vars["?"] == 0
+    local coro, pid
+    if kernel then pid = kernel.fork(tok[0], function() run_tokens(tokens, true) end)
+    else coro = coroutine.create(function() run_tokens(tokens, true) end) end
+    local id = #jobs + 1
+    jobs[id] = {cmd = tokens[1][0] .. " " .. table.concat(tokens[1], " "), coro = coro, pid = pid, isfg = not tokens.async, start = true}
+    if tokens.async then print("[" .. (id) .. "] " .. (pid or "")) end
 end
 
 function shell.run(...)

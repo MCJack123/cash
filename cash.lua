@@ -1076,6 +1076,7 @@ local function readCommand()
     local histpos = table.maxn(history) + 1
     local lastlen = 0
     local waitTab = false
+    local ly = ({term.getCursorPos()})[2]
     local function redrawStr()
         term.setCursorPos(ox, oy)
         local x, y
@@ -1098,6 +1099,7 @@ local function readCommand()
             term.write(" ")
         end
         lastlen = #str
+        ly = ({term.getCursorPos()})[2]
         term.setCursorPos(x, y)
     end
     term.setCursorBlink(true)
@@ -1132,7 +1134,7 @@ local function readCommand()
                 waitTab = false
             elseif ev[2] == keys.tab and coff == #str then
                 local tokens = tokenize(str)[1]
-                -- FIX THIS
+                -- TODO: FIX THIS
                 if completion[tokens[0]] ~= nil then
                     local t = {}
                     for i = 1, table.maxn(tokens) - 1 do t[i] = tokens[i] end
@@ -1217,7 +1219,8 @@ local function readCommand()
         end
         redrawStr()
     end
-    print("")
+    if ly >= ({term.getSize()})[2] then term.scroll(1) end
+    term.setCursorPos(1, ly + 1)
     term.setCursorBlink(false)
     if str ~= "" then 
         table.insert(history, str) 

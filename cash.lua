@@ -38,6 +38,8 @@ local shell_retval = 0
 local shell_title = nil
 local execCommand
 local shell_env = _ENV
+local pausedJob
+local CCKernel2 = kernel and users and kernel.getPID
 
 local function splitFile(filename)
     local file = io.open(filename, "r")
@@ -52,7 +54,7 @@ local function trim(s) return string.match(s, '^()%s*$') and '' or string.match(
 HOME = "/"
 SHELL = topshell and topshell.getRunningProgram() or "/usr/bin/cash"
 PATH = topshell and string.gsub(topshell.path(), "%.:", "") or "/rom/programs:/rom/programs/fun:/rom/programs/rednet"
-USER = kernel and users.getShortName(users.getuid()) or "root"
+USER = CCKernel2 and users.getShortName(users.getuid()) or "root"
 EDITOR = "edit"
 OLDPWD = topshell and topshell.dir() or "/"
 PWD = topshell and topshell.dir() or "/"
@@ -75,7 +77,7 @@ local vars = {
     ["?"] = 0,
     ["0"] = topshell and topshell.getRunningProgram(),
     _ = topshell and topshell.getRunningProgram(),
-    ["$"] = kernel and kernel.getPID() or 0,
+    ["$"] = CCKernel2 and kernel.getPID() or 0,
 }
 
 local aliases = topshell and topshell.aliases() or {}
@@ -137,7 +139,7 @@ local builtins = {
     history = function(...)
         if ({...})[1] == "-c" then
             historyfile.close()
-            historyfile = fs.open(kernel and "/~/.cash_history" or ".cash_history", "w")
+            historyfile = fs.open(CCKernel2 and "/~/.cash_history" or ".cash_history", "w")
             history = {}
             return
         end
@@ -147,12 +149,12 @@ local builtins = {
     end,
     jobs = function(...)
         local filter = {...}
-        for k,v in pairs(jobs) do 
-            if #filter == 0 then print("[" .. k .. "]+  Running  " .. v.cmd) 
+        for k,v in pairs(jobs) do if v.cmd ~= "jobs" then
+            if #filter == 0 then print("[" .. k .. "]+  " .. (v.paused and "Paused" or "Running") .. "  " .. v.cmd) 
             else for l,w in ipairs(filter) do 
-                if k == w then print("[" .. k .. "]+  Running  " .. v.cmd) end 
+                if k == w then print("[" .. k .. "]+  " .. (v.paused and "Paused" or "Running") .. "  " .. v.cmd) end 
             end end 
-        end
+        end end
     end,
     pushd = function(newdir)
         table.insert(dirstack, PWD)
@@ -217,7 +219,7 @@ local builtins = {
             elseif args[1] == "-f" then return n(fs.exists(shell.resolve(args[2])) and not fs.isDir(shell.resolve(args[2])))
             elseif args[1] == "-n" then return n(#args[2] > 0)
             elseif args[1] == "-s" then return n(fs.getSize(shell.resolve(args[2])) > 0)
-            elseif args[1] == "-u" and type(kernel) == "table" then return n(fs.hasPermissions(shell.resolve(args[2]), fs.permissions.setuid))
+            elseif args[1] == "-u" and type(CCKernel2) == "table" then return n(fs.hasPermissions(shell.resolve(args[2]), fs.permissions.setuid))
             elseif args[1] == "-w" then return n(not fs.isReadOnly(shell.resolve(args[2])))
             elseif args[1] == "-x" then return n(true)
             elseif args[1] == "-z" then return n(#args[2] == 0)
@@ -366,6 +368,42 @@ local builtins = {
         end
         function_running = false
         return var
+    end,
+    bg = function(t)
+        if pausedJob then 
+            jobs[pausedJob].isfg = false
+            jobs[pausedJob].paused = false
+            if CCKernel2 then kernel.signal(signal.SIGCONT, jobs[pausedJob].pid) end
+            pausedJob = nil
+            return 0
+        elseif tonumber(t) and jobs[tonumber(t)] then
+            local task = tonumber(t)
+            jobs[task].isfg = false
+            jobs[task].paused = false
+            if CCKernel2 then kernel.signal(signal.SIGCONT, jobs[task].pid) end
+            return 0
+        else
+            printError("cash: bg: current: no such job")
+            return 1
+        end
+    end,
+    fg = function(t)
+        if pausedJob then 
+            jobs[pausedJob].isfg = true
+            jobs[pausedJob].paused = false
+            if CCKernel2 then kernel.signal(signal.SIGCONT, jobs[pausedJob].pid) end
+            pausedJob = nil
+            return 0
+        elseif tonumber(t) and jobs[tonumber(t)] then
+            local task = tonumber(t)
+            jobs[task].isfg = true
+            jobs[task].paused = false
+            if CCKernel2 then kernel.signal(signal.SIGCONT, jobs[task].pid) end
+            return 0
+        else
+            printError("cash: fg: current: no such job")
+            return 1
+        end
     end,
 }
 builtins["["] = builtins.test
@@ -824,7 +862,7 @@ local function execv(tokens)
             vars["?"] = -1
             return
         end
-        if not kernel then
+        if not CCKernel2 then
             local file = fs.open(path, "r")
             local firstLine = file.readLine()
             file.close()
@@ -845,7 +883,7 @@ end
 run_tokens = function(tokens, isAsync)
     if tokens.async and not isAsync then
         local coro, pid
-        if kernel then pid = kernel.fork(tok[0], function() run_tokens(tokens, true) end)
+        if CCKernel2 then pid = kernel.fork(tok[0], function() run_tokens(tokens, true) end)
         else coro = coroutine.create(function() run_tokens(tokens, true) end) end
         local id = #jobs + 1
         jobs[id] = {cmd = tokens[1][0] .. " " .. table.concat(tokens[1], " "), coro = coro, pid = pid, isfg = false, start = true}
@@ -862,7 +900,7 @@ end
 
 run_tokens_async = function(tokens)
     local coro, pid
-    if kernel then pid = kernel.fork(tok[0], function() run_tokens(tokens, true) end)
+    if CCKernel2 then pid = kernel.fork(tok[0], function() run_tokens(tokens, true) end)
     else coro = coroutine.create(function() run_tokens(tokens, true) end) end
     local id = #jobs + 1
     jobs[id] = {cmd = tokens[1][0] .. " " .. table.concat(tokens[1], " "), coro = coro, pid = pid, isfg = not tokens.async, start = true}
@@ -914,7 +952,7 @@ end
 function multishell.launch(environment, path, ...)
     local coro, pid
     local tok = {[0] = path, ...}
-    if kernel then pid = kernel.fork(path, function() execv(tok) end)
+    if CCKernel2 then pid = kernel.fork(path, function() execv(tok) end)
     else coro = coroutine.create(function() execv(tok) end) end
     local id = #jobs + 1
     jobs[id] = {cmd = path .. " " .. table.concat({...}, " "), coro = coro, pid = pid, isfg = false}
@@ -942,7 +980,7 @@ function shell.openTab(...)
         tokens = tokenize(v, string.sub(v, 1, 6) == "while ")
         for k,tok in ipairs(tokens) do if tok[0] ~= "" then 
             local coro, pid
-            if kernel then pid = kernel.fork(tok[0], function() execv(tok) end)
+            if CCKernel2 then pid = kernel.fork(tok[0], function() execv(tok) end)
             else coro = coroutine.create(function() execv(tok) end) end
             local id = #jobs + 1
             jobs[id] = {cmd = tok[0] .. " " .. table.concat(tok, " "), coro = coro, pid = pid, isfg = false}
@@ -966,7 +1004,7 @@ if args[1] ~= nil then
     return shell_retval
 end
 
-if kernel then
+if CCKernel2 then
     if fs.exists("/etc/cashrc") then
         local file = io.open("/etc/cashrc", "r")
         for line in file:lines() do shell.run(line) end
@@ -1104,7 +1142,7 @@ local function readCommand()
     end
     term.setCursorBlink(true)
     while true do
-        local ev = {os.pullEvent()}
+        local ev = {os.pullEventRaw()}
         if ev[1] == "key" then
             if ev[2] == keys.enter then break
             elseif ev[2] == keys.up and history[histpos-1] ~= nil then 
@@ -1216,10 +1254,16 @@ local function readCommand()
             str = string.sub(str, 1, coff) .. ev[2] .. string.sub(str, coff + 1)
             coff = coff + #ev[2]
             waitTab = false
+        elseif ev[1] == "terminate" then
+            str = ""
+            break
         end
         redrawStr()
     end
-    if ly >= ({term.getSize()})[2] then term.scroll(1) end
+    if ly >= ({term.getSize()})[2] then 
+        term.scroll(1) 
+        ly = ly - 1
+    end
     term.setCursorPos(1, ly + 1)
     term.setCursorBlink(false)
     if str ~= "" then 
@@ -1232,7 +1276,7 @@ end
 
 local function jobManager()
     while running do
-        if kernel then
+        if CCKernel2 then
             local e = {os.pullEventRaw()}
             if e[1] == "process_complete" then
                 for k,v in pairs(jobs) do if v.pid == e[2] then 
@@ -1245,11 +1289,14 @@ local function jobManager()
             local delete = {}
             local e = {os.pullEventRaw()}
             for k,v in pairs(jobs) do
-                if (v.filter == nil or v.filter == e[1]) and (v.isfg or v.start or not (
+                if not v.paused and (v.filter == nil or v.filter == e[1]) and (v.isfg or v.start or not (
                     e[1] == "key" or e[1] == "char" or e[1] == "key_up" or e[1] == "paste" or
                     e[1] == "mouse_click" or e[1] == "mouse_up" or e[1] == "mouse_drag" or 
                     e[1] == "mouse_scroll" or e[1] == "monitor_touch")) then
+                    if v.term then term.redirect(v.term) end
                     local ok, filter = coroutine.resume(v.coro, table.unpack(e))
+                    v.term = term.current()
+                    term.redirect(term.native())
                     if coroutine.status(v.coro) == "dead" then
                         table.insert(delete, k)
                         completed_jobs[k] = {err = "Done", cmd = v.cmd, isfg = v.isfg}
@@ -1263,21 +1310,48 @@ local function jobManager()
                     v.start = false
                 end
             end
-            for k,v in ipairs(delete) do jobs[k] = nil end
+            for k,v in ipairs(delete) do jobs[v] = nil end
         end
     end
 end
 
 parallel.waitForAny(function()
     while running do 
-        for k,v in pairs(completed_jobs) do if v.isfg then b = true else print("[" .. k .. "]+  " .. v.err .. "  " .. v.cmd) end end
+        for k,v in pairs(completed_jobs) do if not v.isfg then print("[" .. k .. "]+  " .. v.err .. "  " .. v.cmd) end end
         completed_jobs = {}
-        shell.runAsync(readCommand()) 
-        while true do
+        shell.runAsync(readCommand())
+        while #jobs > 0 do
             local b = true
-            for k,v in pairs(jobs) do if v.isfg then b = false end end
+            for k,v in pairs(jobs) do if v.isfg and not v.paused then b = false; break end end
             if b then break end
-            os.pullEvent()
+            if os.pullEventRaw() == "terminate" then
+                for k,v in pairs(jobs) do if v.isfg and not v.paused then
+                    jobs[k] = nil
+                    term.redirect(term.native())
+                    print("^T")
+                    b = true
+                    break
+                end end
+            end
+            if b then break end
+        end
+    end
+end, function()
+    local ctrlHeld = false
+    while running do
+        local ev = {os.pullEventRaw()}
+        if ev[1] == "key" and (ev[2] == keys.leftCtrl or ev[2] == keys.rightCtrl) then ctrlHeld = true
+        elseif ev[1] == "key_up" and (ev[2] == keys.leftCtrl or ev[2] == keys.rightCtrl) then ctrlHeld = false
+        elseif ctrlHeld and ev[1] == "key" and ev[2] == keys.z then
+            print("^Z")
+            for k,v in pairs(jobs) do if v.isfg and not v.paused then 
+                v.paused = true
+                if CCKernel2 then kernel.signal(signal.SIGSTOP, v.pid) end
+                pausedJob = k
+                print("[" .. k .. "]+  Paused  " .. v.cmd)
+                os.queueEvent("job_paused")
+                break
+            end end
         end
     end
 end, jobManager)

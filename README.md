@@ -28,6 +28,8 @@ A Bourne-compatible shell for ComputerCraft.
 ### TODO
 * Add test boolean operators (-a, -o)
 * Add case statement
+* Add /usr/bin/env equivalent
+* Add &&, || operators
 
 ## License
 This project is licensed under the MIT license. You are free to modify and redistribute cash.lua as long as the copyright notice is preserved at the top of the script.

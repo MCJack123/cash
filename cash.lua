@@ -36,6 +36,7 @@ local args = {...}
 local running = true
 local shell_retval = 0
 local shell_title = nil
+local execCommand
 
 local function splitFile(filename)
     local file = io.open(filename, "r")
@@ -44,6 +45,8 @@ local function splitFile(filename)
     file:close()
     return retval
 end
+
+local function trim(s) return string.match(s, '^()%s*$') and '' or string.match(s, '^%s*(.*%S)') end
 
 HOME = "/"
 SHELL = topshell and topshell.getRunningProgram() or "/usr/bin/cash"
@@ -119,7 +122,7 @@ local builtins = {
     complete = function() end, -- TODO
     dirs = function() print(PWD) end,
     eval = function(...) shell.run(...); return vars["?"] end,
-    exec = function(...) shell.run(...); return vars["?"] end,
+    exec = function(...) execCommand = table.concat({...}, ' '); shell.exit() end,
     exit = shell.exit,
     export = function(...)
         local vars = {...}
@@ -672,7 +675,7 @@ local function tokenize(cmdline, noexpand)
         end
         escape = c == '\\' and not quoted and not escape
     end
-    for k,v in ipairs(retval) do
+    for k,v in ipairs(retval) do if v[0] ~= "" then
         local path, islocal = shell.resolveProgram(v[0])
         path = path or v[0]
         if not (islocal and string.find(v[0], "/") == nil) then v[0] = path end
@@ -686,7 +689,7 @@ local function tokenize(cmdline, noexpand)
                 for i = 1, table.maxn(v) do v[i-1] = v[i] end
             end
         end
-    end
+    end end
     return retval
 end
 
@@ -816,15 +819,29 @@ local function execv(tokens)
 end
 
 run_tokens = function(tokens)
-    for k,tok in ipairs(tokens) do if tok[0] ~= "" then 
+    for k,tok in ipairs(tokens) do if trim(tok[0]) ~= "" then 
         if tok.async then
             local coro, pid
             if kernel then pid = kernel.fork(tok[0], function() execv(tok) end)
             else coro = coroutine.create(function() execv(tok) end) end
             local id = #jobs + 1
-            jobs[id] = {cmd = tok[0] .. " " .. table.concat(tok, " "), coro = coro, pid = pid}
+            jobs[id] = {cmd = tok[0] .. " " .. table.concat(tok, " "), coro = coro, pid = pid, isfg = false, start = true}
             print("[" .. (id) .. "] " .. (pid or ""))
         else execv(tok) end
+    end end
+    return vars["?"] == 0
+end
+
+run_tokens_async = function(tokens)
+    for k,tok in ipairs(tokens) do if trim(tok[0]) ~= "" then 
+        if tok[0] == "exec" then execv(tok) else
+            local coro, pid
+            if kernel then pid = kernel.fork(tok[0], function() execv(tok) end)
+            else coro = coroutine.create(function() execv(tok) end) end
+            local id = #jobs + 1
+            jobs[id] = {cmd = tok[0] .. " " .. table.concat(tok, " "), coro = coro, pid = pid, isfg = not tok.async, start = true}
+            if tok.async then print("[" .. (id) .. "] " .. (pid or "")) end
+        end
     end end
     return vars["?"] == 0
 end
@@ -850,13 +867,34 @@ function shell.run(...)
     return vars["?"] == 0
 end
 
+function shell.runAsync(...)
+    local cmd = table.concat({...}, " ")
+    if cmd == "" or string.sub(cmd, 1, 1) == "#" then return end
+    if function_name ~= nil then
+        if string.find(cmd, "}") then function_name = nil
+        else table.insert(functions[function_name], cmd) end
+        return true
+    elseif while_statement > 0 then
+        local tokens = splitSemicolons(cmd)
+        for k,line in ipairs(tokens) do 
+            line = string.sub(line, #string.match(line, "^ *") + 1)
+            if line == "do" or line == "done" or string.find(line, "^do ") or string.find(line, "^done ") then run_tokens(tokenize(line)) end
+            if while_statement > 0 then table.insert(while_table[1].lines, line) end
+        end
+        return true
+    end
+    local lines = splitSemicolons(cmd)
+    for k,v in ipairs(lines) do run_tokens_async(tokenize(v, string.sub(v, 1, 6) == "while ")) end
+    return vars["?"] == 0
+end
+
 function multishell.launch(environment, path, ...)
     local coro, pid
     local tok = {[0] = path, ...}
     if kernel then pid = kernel.fork(path, function() execv(tok) end)
     else coro = coroutine.create(function() execv(tok) end) end
     local id = #jobs + 1
-    jobs[id] = {cmd = path .. " " .. table.concat({...}, " "), coro = coro, pid = pid}
+    jobs[id] = {cmd = path .. " " .. table.concat({...}, " "), coro = coro, pid = pid, isfg = false}
     return id
 end
 
@@ -884,7 +922,7 @@ function shell.openTab(...)
             if kernel then pid = kernel.fork(tok[0], function() execv(tok) end)
             else coro = coroutine.create(function() execv(tok) end) end
             local id = #jobs + 1
-            jobs[id] = {cmd = tok[0] .. " " .. table.concat(tok, " "), coro = coro, pid = pid}
+            jobs[id] = {cmd = tok[0] .. " " .. table.concat(tok, " "), coro = coro, pid = pid, isfg = false}
             print("[" .. (id) .. "] " .. (pid or ""))
         end end
     end
@@ -1181,17 +1219,22 @@ local function jobManager()
             local delete = {}
             local e = {os.pullEventRaw()}
             for k,v in pairs(jobs) do
-                if v.filter == nil or v.filter == e[1] then
+                if (v.filter == nil or v.filter == e[1]) and (v.isfg or v.start or not (
+                    e[1] == "key" or e[1] == "char" or e[1] == "key_up" or e[1] == "paste" or
+                    e[1] == "mouse_click" or e[1] == "mouse_up" or e[1] == "mouse_drag" or 
+                    e[1] == "mouse_scroll" or e[1] == "monitor_touch")) then
                     local ok, filter = coroutine.resume(v.coro, table.unpack(e))
                     if coroutine.status(v.coro) == "dead" then
                         table.insert(delete, k)
-                        completed_jobs[k] = {err = "Done", cmd = v.cmd}
+                        completed_jobs[k] = {err = "Done", cmd = v.cmd, isfg = v.isfg}
+                        os.queueEvent("job_complete", k)
                     elseif not ok then
                         table.insert(delete, k)
-                        completed_jobs[k] = {err = filter, cmd = v.cmd}
+                        completed_jobs[k] = {err = filter, cmd = v.cmd, isfg = v.isfg}
+                        os.queueEvent("job_complete", k)
                     end
                     v.filter = filter
-                    
+                    v.start = false
                 end
             end
             for k,v in ipairs(delete) do jobs[k] = nil end
@@ -1201,10 +1244,19 @@ end
 
 parallel.waitForAny(function()
     while running do 
-        for k,v in pairs(completed_jobs) do print("[" .. k .. "]+  " .. v.err .. "  " .. v.cmd) end
+        for k,v in pairs(completed_jobs) do if v.isfg then b = true else print("[" .. k .. "]+  " .. v.err .. "  " .. v.cmd) end end
         completed_jobs = {}
-        shell.run(readCommand()) 
+        shell.runAsync(readCommand()) 
+        while true do
+            local b = true
+            for k,v in pairs(jobs) do if v.isfg then b = false end end
+            if b then break end
+            os.pullEvent()
+        end
     end
 end, jobManager)
+
+if execCommand then shell.run(execCommand); return vars["?"] end
+
 historyfile.close()
 return shell_retval

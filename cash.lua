@@ -37,6 +37,7 @@ local running = true
 local shell_retval = 0
 local shell_title = nil
 local execCommand
+local shell_env = _ENV
 
 local function splitFile(filename)
     local file = io.open(filename, "r")
@@ -568,6 +569,14 @@ function multishell.getFocus()
     return 1
 end
 
+function shell.environment()
+    return shell_env
+end
+
+function shell.setEnvironment(e)
+    shell_env = e
+end
+
 local function expandVar(var)
     if string.sub(var, 1, 1) ~= "$" then return nil end
     if string.sub(var, 2, 2) == "{" then
@@ -827,7 +836,7 @@ local function execv(tokens)
         end
         local _old = vars._
         vars._ = path
-        run(setmetatable({shell = shell, multishell = multishell, package = pack, require = require}, {__index = _ENV}), path, table.unpack(tokens)) 
+        run(setmetatable({shell = shell, multishell = multishell, package = pack, require = require}, {__index = shell_env}), path, table.unpack(tokens)) 
         vars._ = _old
     end
     for k,v in pairs(tokens.vars) do _ENV[k] = oldenv[k] end

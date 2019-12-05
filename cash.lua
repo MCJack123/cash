@@ -22,6 +22,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ]]--
 
+-- To silence IDE warnings
+kernel = kernel
+users = users
+signal = signal
+
 local topshell = _ENV.shell
 local shell = {}
 local multishell = {}
@@ -41,14 +46,6 @@ local shell_env = _ENV
 local pausedJob
 local CCKernel2 = kernel and users and kernel.getPID
 
-local function splitFile(filename)
-    local file = io.open(filename, "r")
-    local retval = {}
-    for line in file:lines() do table.insert(retval, line) end
-    file:close()
-    return retval
-end
-
 local function trim(s) return string.match(s, '^()%s*$') and '' or string.match(s, '^%s*(.*%S)') end
 
 HOME = "/"
@@ -67,7 +64,7 @@ local vars = {
     PS2 = "> ",
     IFS = "\n",
     CASH = topshell and topshell.getRunningProgram(),
-    CASH_VERSION = "0.2",
+    CASH_VERSION = "0.3",
     RANDOM = function() return math.random(0, 32767) end,
     SECONDS = function() return math.floor((os.epoch() - start_time) / 1000) end,
     HOSTNAME = os.getComputerLabel(),
@@ -97,7 +94,8 @@ local dirstack = {}
 local jobs = {}
 local completed_jobs = {}
 
-local builtins = {
+local builtins
+builtins = {
     [":"] = function() return 0 end,
     ["."] = function(path)
         path = fs.exists(path) and path or shell.resolve(path)
@@ -112,7 +110,7 @@ local builtins = {
         file:close()
     end,
     echo = function(...) print(...); return 0 end,
-    builtin = function(name, ...) return builtin[name](...) end,
+    builtin = function(name, ...) return builtins[name](...) end,
     cd = function(dir)
         if not fs.isDir(shell.resolve(dir or "/")) then 
             printError("cash: cd: " .. dir .. ": No such file or directory")
@@ -123,7 +121,6 @@ local builtins = {
     end,
     command = function(...) no_funcs = true; shell.run(...); no_funcs = false; return vars["?"] end,
     complete = function() end, -- TODO
-    dirs = function() print(PWD) end,
     eval = function(...) shell.run(...); return vars["?"] end,
     exec = function(...) execCommand = table.concat({...}, ' '); shell.exit() end,
     exit = shell.exit,
@@ -186,8 +183,10 @@ local builtins = {
         local lvars = {...}
         if #lvars == 0 then for k,v in pairs(vars) do print(k .. "=" .. v) end else
             for k,v in ipairs(lvars) do
-                local kk, vv = string.match(v, "(.+)=(.+)")
-                vars[kk] = vv
+                if string.find(v, "=") then
+                    local kk, vv = string.match(v, "(.+)=(.+)")
+                    vars[kk] = vv
+                end
             end
         end
     end,
@@ -241,7 +240,7 @@ local builtins = {
     end,
     ["true"] = function() return 0 end,
     ["false"] = function() return 1 end,
-    unalias = function(...) for k,v in ipairs({...}) do alias[v] = nil end end,
+    unalias = function(...) for k,v in ipairs({...}) do aliases[v] = nil end end,
     unset = function(...) for k,v in ipairs({...}) do vars[v] = nil end end,
     wait = function(job)
         if job then while jobs[tonumber(job)] ~= nil do sleep(0.1) end
@@ -742,14 +741,12 @@ local function tokenize(cmdline, noexpand)
         path = path or v[0]
         if not (islocal and string.find(v[0], "/") == nil) then v[0] = path end
         v.vars = {}
-        if #v > 1 then
-            while v[0] and string.find(v[0], "=") do
-                local l = string.sub(v[0], 1, string.find(v[0], "=") - 1)
-                v.vars[l] = string.sub(v[0], string.find(v[0], "=") + 1)
-                v.vars[l] = tonumber(v.vars[l]) or v.vars[l]
-                v[0] = nil
-                for i = 1, table.maxn(v) do v[i-1] = v[i] end
-            end
+        while v[0] and string.find(v[0], "=") do
+            local l = string.sub(v[0], 1, string.find(v[0], "=") - 1)
+            v.vars[l] = string.sub(v[0], string.find(v[0], "=") + 1)
+            v.vars[l] = tonumber(v.vars[l]) or v.vars[l]
+            v[0] = nil
+            for i = 1, table.maxn(v) do v[i-1] = v[i]; v[i] = nil end
         end
     end end
     return retval
@@ -883,27 +880,31 @@ end
 run_tokens = function(tokens, isAsync)
     if tokens.async and not isAsync then
         local coro, pid
-        if CCKernel2 then pid = kernel.fork(tok[0], function() run_tokens(tokens, true) end)
+        if CCKernel2 then pid = kernel.fork("cash", function() run_tokens(tokens, true) end)
         else coro = coroutine.create(function() run_tokens(tokens, true) end) end
         local id = #jobs + 1
         jobs[id] = {cmd = tokens[1][0] .. " " .. table.concat(tokens[1], " "), coro = coro, pid = pid, isfg = false, start = true}
         print("[" .. (id) .. "] " .. (pid or ""))
     else
-        for k,tok in ipairs(tokens) do if trim(tok[0]) ~= "" then 
-            if (tok.last == 0 and vars["?"] == 0) or (tok.last == 1 and vars["?"] ~= 0) or tok.last == nil then
-                execv(tok) 
-            end
-        end end
+        for k,tok in ipairs(tokens) do 
+            if tok[0] then
+                if trim(tok[0]) ~= "" and (tok.last == 0 and vars["?"] == 0) or (tok.last == 1 and vars["?"] ~= 0) or tok.last == nil then
+                    execv(tok) 
+                end
+            else
+                for k,v in pairs(tok.vars) do vars[k] = tonumber(v) or v end
+            end 
+        end
     end
     return vars["?"] == 0
 end
 
-run_tokens_async = function(tokens)
+local run_tokens_async = function(tokens)
     local coro, pid
-    if CCKernel2 then pid = kernel.fork(tok[0], function() run_tokens(tokens, true) end)
+    if CCKernel2 then pid = kernel.fork("cash", function() run_tokens(tokens, true) end)
     else coro = coroutine.create(function() run_tokens(tokens, true) end) end
     local id = #jobs + 1
-    jobs[id] = {cmd = tokens[1][0] .. " " .. table.concat(tokens[1], " "), coro = coro, pid = pid, isfg = not tokens.async, start = true}
+    jobs[id] = {cmd = tokens[1][0] and (tokens[1][0] .. " " .. table.concat(tokens[1], " ")) or "cash", coro = coro, pid = pid, isfg = not tokens.async, start = true}
     if tokens.async then print("[" .. (id) .. "] " .. (pid or "")) end
 end
 
@@ -977,7 +978,7 @@ function shell.openTab(...)
     end
     local lines = splitSemicolons(cmd)
     for k,v in ipairs(lines) do 
-        tokens = tokenize(v, string.sub(v, 1, 6) == "while ")
+        local tokens = tokenize(v, string.sub(v, 1, 6) == "while ")
         for k,tok in ipairs(tokens) do if tok[0] ~= "" then 
             local coro, pid
             if CCKernel2 then pid = kernel.fork(tok[0], function() execv(tok) end)
@@ -1047,7 +1048,7 @@ local function ansiWrite(str)
         else return tonumber(string.sub(seq, 2)) end 
     end
     for c in string.gmatch(str, ".") do
-        if seq == "\x1b" then
+        if seq == "\27" then
             if c == "c" then
                 term.setBackgroundColor(colors.black)
                 term.setTextColor(colors.white)
@@ -1101,7 +1102,7 @@ local function ansiWrite(str)
                 end
                 seq = nil
             end
-        elseif c == string.char(0x1b) then seq = "\x1b"
+        elseif c == string.char(0x1b) then seq = "\27"
         else write(c) end
     end
 end
@@ -1293,10 +1294,10 @@ local function jobManager()
                     e[1] == "key" or e[1] == "char" or e[1] == "key_up" or e[1] == "paste" or
                     e[1] == "mouse_click" or e[1] == "mouse_up" or e[1] == "mouse_drag" or 
                     e[1] == "mouse_scroll" or e[1] == "monitor_touch")) then
+                    local oldterm = term.current()
                     if v.term then term.redirect(v.term) end
                     local ok, filter = coroutine.resume(v.coro, table.unpack(e))
-                    v.term = term.current()
-                    term.redirect(term.native())
+                    v.term = term.redirect(oldterm)
                     if coroutine.status(v.coro) == "dead" then
                         table.insert(delete, k)
                         completed_jobs[k] = {err = "Done", cmd = v.cmd, isfg = v.isfg}
@@ -1327,7 +1328,6 @@ parallel.waitForAny(function()
             if os.pullEventRaw() == "terminate" then
                 for k,v in pairs(jobs) do if v.isfg and not v.paused then
                     jobs[k] = nil
-                    term.redirect(term.native())
                     print("^T")
                     b = true
                     break

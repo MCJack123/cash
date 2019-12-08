@@ -45,6 +45,7 @@ local execCommand
 local shell_env = _ENV
 local pausedJob
 local CCKernel2 = kernel and users and kernel.getPID
+local OpusOS = kernel and kernel.hook
 
 local function trim(s) return string.match(s, '^()%s*$') and '' or string.match(s, '^%s*(.*%S)') end
 
@@ -68,13 +69,14 @@ local vars = {
     RANDOM = function() return math.random(0, 32767) end,
     SECONDS = function() return math.floor((os.epoch() - start_time) / 1000) end,
     HOSTNAME = os.getComputerLabel(),
+    TERMINATE_QUIT = "no",
     ["*"] = table.concat(args, " "),
     ["@"] = function() return table.concat(args, " ") end,
     ["#"] = #args,
     ["?"] = 0,
     ["0"] = topshell and topshell.getRunningProgram(),
     _ = topshell and topshell.getRunningProgram(),
-    ["$"] = CCKernel2 and kernel.getPID() or 0,
+    ["$"] = CCKernel2 and kernel.getPID() or (OpusOS and kernel.getCurrent() or 0),
 }
 
 local aliases = topshell and topshell.aliases() or {}
@@ -522,8 +524,8 @@ function shell.resolveProgram(name)
     if builtins[name] ~= nil then return name end
     if aliases[name] ~= nil then name = aliases[name] end
     for path in string.gmatch(PATH, "[^:]+") do
-        if fs.exists(fs.combine(shell.resolve(path), name)) then return fs.combine(shell.resolve(path), name)
-        elseif fs.exists(fs.combine(shell.resolve(path), name .. ".lua")) then return fs.combine(shell.resolve(path), name .. ".lua") end
+        if fs.exists(fs.combine(shell.resolve(path), name)) and not fs.isDir(fs.combine(shell.resolve(path), name)) then return fs.combine(shell.resolve(path), name)
+        elseif fs.exists(fs.combine(shell.resolve(path), name .. ".lua")) and not fs.isDir(fs.combine(shell.resolve(path), name .. ".lua")) then return fs.combine(shell.resolve(path), name .. ".lua") end
     end
     if fs.exists(shell.resolve(name)) and not fs.isDir(shell.resolve(name)) then return shell.resolve(name), string.find(name, "/") == nil end
     if fs.exists(shell.resolve(name .. ".lua")) and not fs.isDir(shell.resolve(name .. ".lua")) then return shell.resolve(name .. ".lua"), string.find(name, "/") == nil end
@@ -1256,6 +1258,7 @@ local function readCommand()
             coff = coff + #ev[2]
             waitTab = false
         elseif ev[1] == "terminate" then
+            if vars.TERMINATE_QUIT == "yes" or vars.terminate_quit == 1 then running = false end
             str = ""
             break
         end

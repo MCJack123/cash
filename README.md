@@ -18,6 +18,7 @@ A Bourne-compatible shell for ComputerCraft.
 * Background jobs
 * rc files
 * Restorable history
+* Job control, pausing
 * Partial CCKernel2 support
 * Full compatibility with CraftOS shell.lua
 

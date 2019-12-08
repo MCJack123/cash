@@ -249,14 +249,58 @@ builtins = {
         else while table.maxn(jobs) ~= 0 do sleep(0.1) end end
     end,
     lua = function(...)
-        if #({...}) > 0 then 
-            local f, err = loadstring("return " .. table.concat({...}, " "))
-            if f then 
-                setfenv(f, setmetatable({shell = shell, multishell = multishell, package = pack, require = require}, {__index = _ENV}))
-                local r = {pcall(f)}
-                table.remove(r, 1)
-                print(table.unpack(r))
-            else printError(err) end 
+        if #({...}) > 0 then
+            if fs.exists(shell.resolve(...)) then
+                local args = {...}
+                table.remove(args, 1)
+                shell.run(shell.resolve(...), table.unpack(args)) 
+            else
+                local s = table.concat({...}, " ")
+                local tEnv = setmetatable({shell = shell, multishell = multishell, package = pack, require = require, _echo = function(...) return ... end}, {__index = _ENV})
+                local nForcePrint = 0
+                local func, e = load( s, "lua", "t", tEnv )
+                local func2, e2 = load( "return _echo("..s..");", "lua", "t", tEnv )
+                if not func then
+                    if func2 then
+                        func = func2
+                        e = nil
+                        nForcePrint = 1
+                    end
+                else
+                    if func2 then
+                        func = func2
+                    end
+                end
+                if func then
+                    local tResults = table.pack( pcall( func ) )
+                    if tResults[1] then
+                        local n = 1
+                        while n < tResults.n or (n <= nForcePrint) do
+                            local value = tResults[ n + 1 ]
+                            if type( value ) == "table" then
+                                local metatable = getmetatable( value )
+                                if type(metatable) == "table" and type(metatable.__tostring) == "function" then
+                                    print( tostring( value ) )
+                                else
+                                    local ok, serialised = pcall( textutils.serialise, value )
+                                    if ok then
+                                        print( serialised )
+                                    else
+                                        print( tostring( value ) )
+                                    end
+                                end
+                            else
+                                print( tostring( value ) )
+                            end
+                            n = n + 1
+                        end
+                    else
+                        printError( tResults[2] )
+                    end
+                else
+                    printError( e )
+                end
+            end
         else shell.run("/rom/programs/lua.lua") end
     end,
     cat = function(...)

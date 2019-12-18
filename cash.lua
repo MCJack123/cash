@@ -1154,6 +1154,7 @@ local function ansiWrite(str)
 end
 
 local function readCommand()
+    if term.getGraphicsMode and term.getGraphicsMode() then term.setGraphicsMode(false) end
     ansiWrite(getPrompt())
     local str = ""
     local ox, oy = term.getCursorPos()

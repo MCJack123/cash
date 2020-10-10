@@ -1,5 +1,5 @@
-# ComputerCraft Advanced Shell
-A Bourne-compatible shell for ComputerCraft.
+# cash
+cash is a shell for ComputerCraft that is compatible with the Bourne shell (`sh`) used in most Linux/UNIX distributions.
 
 ![image](image.png)
 
@@ -29,6 +29,12 @@ A Bourne-compatible shell for ComputerCraft.
 ### TODO
 * Add test boolean operators (-a, -o)
 * Add case statement
+
+## Downloading
+You can download the latest version of cash from GitHub:
+```
+wget https://raw.githubusercontent.com/MCJack123/cash/master/cash.lua cash.lua
+```
 
 ## License
 This project is licensed under the MIT license. You are free to modify and redistribute cash.lua as long as the copyright notice is preserved at the top of the script.

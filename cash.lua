@@ -1,7 +1,7 @@
 --[[
 MIT License
 
-Copyright (c) 2019 JackMacWindows
+Copyright (c) 2019-2020 JackMacWindows
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -46,6 +46,9 @@ local shell_env = _ENV
 local pausedJob
 local CCKernel2 = kernel and users and kernel.getPID
 local OpusOS = kernel and kernel.hook
+local make_require = dofile("/rom/modules/main/cc/require.lua").make
+
+if table.maxn == nil then table.maxn = function(t) local i = 1 while t[i] ~= nil do i = i + 1 end return i - 1 end end
 
 local function trim(s) return string.match(s, '^()%s*$') and '' or string.match(s, '^%s*(.*%S)') end
 
@@ -64,7 +67,7 @@ local vars = {
     PS1 = "\\s-\\v\\$ ",
     PS2 = "> ",
     IFS = "\n",
-    CASH = topshell and topshell.getRunningProgram(),
+    CASH = topshell and topshell.getRunningProgram() or "cash.lua",
     CASH_VERSION = "0.3",
     RANDOM = function() return math.random(0, 32767) end,
     SECONDS = function() return math.floor((os.epoch() - start_time) / 1000) end,
@@ -74,8 +77,8 @@ local vars = {
     ["@"] = function() return table.concat(args, " ") end,
     ["#"] = #args,
     ["?"] = 0,
-    ["0"] = topshell and topshell.getRunningProgram(),
-    _ = topshell and topshell.getRunningProgram(),
+    ["0"] = topshell and topshell.getRunningProgram() or "cash.lua",
+    _ = topshell and topshell.getRunningProgram() or "cash.lua",
     ["$"] = CCKernel2 and kernel.getPID() or (OpusOS and kernel.getCurrent() or 0),
 }
 
@@ -453,90 +456,6 @@ builtins = {
 }
 builtins["["] = builtins.test
 
-pack.loaded = {
-    _G = _G,
-    bit32 = bit32,
-    coroutine = coroutine,
-    math = math,
-    package = pack,
-    string = string,
-    table = table,
-}
-pack.loaders = {
-    function( name )
-        if pack.preload[name] then
-            return pack.preload[name]
-        else
-            return nil, "no field package.preload['" .. name .. "']"
-        end
-    end,
-    function( name )
-        local fname = string.gsub(name, "%.", "/")
-        local sError = ""
-        for pattern in string.gmatch(pack.path, "[^;]+") do
-            local sPath = string.gsub(pattern, "%?", fname)
-            if sPath:sub(1,1) ~= "/" then
-                sPath = fs.combine(PWD, sPath)
-            end
-            if fs.exists(sPath) and not fs.isDir(sPath) then
-                local fnFile, sError = loadfile( sPath, setmetatable({shell = shell, multishell = multishell, package = pack, require = require}, {__index = _ENV}) )
-                if fnFile then
-                    return fnFile, sPath
-                else
-                    return nil, sError
-                end
-            else
-                if #sError > 0 then
-                    sError = sError .. "\n"
-                end
-                sError = sError .. "no file '" .. sPath .. "'!"
-            end
-        end
-        return nil, sError
-    end
-}
-pack.preload = {}
-pack.config = "/\n;\n?\n!\n-"
-pack.path = "?;?.lua;?/init.lua;/rom/modules/main/?;/rom/modules/main/?.lua;/rom/modules/main/?/init.lua"
-if turtle then
-    pack.path = pack.path..";/rom/modules/turtle/?;/rom/modules/turtle/?.lua;/rom/modules/turtle/?/init.lua"
-elseif command then
-    pack.path = pack.path..";/rom/modules/command/?;/rom/modules/command/?.lua;/rom/modules/command/?/init.lua"
-end
-pack.custom = true
-
-local sentinel = {}
-function require( name )
-    if type( name ) ~= "string" then
-        error( "bad argument #1 (expected string, got " .. type( name ) .. ")", 2 )
-    end
-    if pack.loaded[name] == sentinel then
-        error("Loop detected requiring '" .. name .. "'", 0)
-    end
-    if pack.loaded[name] then
-        return pack.loaded[name]
-    end
-
-    local sError = "Error loading module '" .. name .. "':"
-    for n,searcher in ipairs(pack.loaders) do
-        local loader, err = searcher(name)
-        if loader then
-            pack.loaded[name] = sentinel
-            local result = loader( err )
-            if result ~= nil then
-                pack.loaded[name] = result
-                return result
-            else
-                pack.loaded[name] = true
-                return true
-            end
-        else
-            sError = sError .. "\n" .. err
-        end
-    end
-    error(sError, 2)
-end
-
 function shell.exit(retval)
     running = false
     shell_retval = retval or 0
@@ -547,6 +466,7 @@ function shell.dir()
 end
 
 function shell.setDir(path)
+    expect(1, path, "string")
     OLDPWD = PWD
     PWD = path
 end
@@ -556,15 +476,18 @@ function shell.path()
 end
 
 function shell.setPath(path)
+    expect(1, path, "string")
     PATH = path
 end
 
 function shell.resolve(localPath)
+    expect(1, localPath, "string")
     if string.sub(localPath, 1, 1) == "/" then return fs.combine(localPath, "")
     else return fs.combine(PWD, localPath) end
 end
 
 function shell.resolveProgram(name)
+    expect(1, name, "string")
     if builtins[name] ~= nil then return name end
     if aliases[name] ~= nil then name = aliases[name] end
     for path in string.gmatch(PATH, "[^:]+") do
@@ -581,10 +504,13 @@ function shell.aliases()
 end
 
 function shell.setAlias(alias, program)
+    expect(1, alias, "string")
+    expect(2, program, "string")
     aliases[alias] = program
 end
 
 function shell.clearAlias(alias)
+    expect(1, alias, "string")
     aliases[alias] = nil
 end
 
@@ -594,6 +520,7 @@ local function combineArray(dst, src, prefix)
 end
 
 function shell.programs(showHidden)
+    -- todo: implement showHidden
     local retval = {}
     for path in string.gmatch(PATH, "[^:]+") do combineArray(retval, fs.find(fs.combine(shell.resolve(path), "*"))) end
     combineArray(retval, fs.find(fs.combine(PWD, "*")), "./")
@@ -605,10 +532,12 @@ function shell.getRunningProgram()
 end
 
 function shell.complete(prefix)
+    expect(1, prefix, "string")
     return fs.complete(prefix, PWD)
 end
 
 function shell.completeProgram(prefix)
+    expect(1, prefix, "string")
     if string.find(prefix, "/") then
         return fs.complete(prefix, PWD, true, false)
     else
@@ -619,6 +548,8 @@ function shell.completeProgram(prefix)
 end
 
 function shell.setCompletionFunction(path, completionFunction)
+    expect(1, path, "string")
+    expect(2, completionFunction, "function")
     completion[path] = {fnComplete = completionFunction}
 end
 
@@ -637,6 +568,7 @@ function multishell.getCount()
 end
 
 function multishell.setFocus(id)
+    expect(1, id, "number")
     return id == 1
 end
 
@@ -657,6 +589,7 @@ function shell.environment()
 end
 
 function shell.setEnvironment(e)
+    expect(1, e, "table")
     shell_env = e
 end
 
@@ -815,15 +748,16 @@ local function dayToString(day)
 end
 
 local function getPrompt()
-    local retval = (if_statement > 0 or while_statement > 0 or case_statement > 0) and vars.PS2 or vars.PS1
+    local retval = (if_statement > 0 or while_statement > 0 or case_statement > 0) and vars.PS2 or vars.PS1 or "\\$ "
     for k,v in pairs({
         ["\\d"] = dayToString(os.day()),
+        ["\\e"] = string.char(0x1b),
         ["\\h"] = string.sub(os.getComputerLabel() or "localhost", 1, string.find(os.getComputerLabel() or "localhost", "%.")),
         ["\\H"] = os.getComputerLabel() or "localhost",
         ["\\n"] = "\n",
         ["\\s"] = string.gsub(fs.getName(vars["0"]), ".lua", ""),
-        ["\\t"] = textutils.formatTime(os.epoch(), true),
-        ["\\T"] = textutils.formatTime(os.epoch(), false),
+        ["\\t"] = textutils.formatTime(os.time(), true),
+        ["\\T"] = textutils.formatTime(os.time(), false),
         ["\\u"] = USER,
         ["\\v"] = vars.CASH_VERSION,
         ["\\V"] = vars.CASH_VERSION,
@@ -909,7 +843,7 @@ local function execv(tokens)
             local file = fs.open(path, "r")
             local firstLine = file.readLine()
             file.close()
-            if string.sub(firstLine, 1, 2) == "#!" then
+            if firstLine ~= nil and string.sub(firstLine, 1, 2) == "#!" then
                 table.insert(tokens, 1, path)
                 path = string.sub(firstLine, 3)
                 if not fs.exists(path) and fs.exists(path .. ".lua") then path = path .. ".lua" end
@@ -917,7 +851,9 @@ local function execv(tokens)
         end
         local _old = vars._
         vars._ = path
-        run(setmetatable({shell = shell, multishell = multishell, package = pack, require = require}, {__index = shell_env}), path, table.unpack(tokens)) 
+        local cmdenv = setmetatable({shell = shell, multishell = multishell}, {__index = shell_env})
+        cmdenv.require, cmdenv.package = make_require(cmdenv, PWD)
+        run(cmdenv, path, table.unpack(tokens)) 
         vars._ = _old
     end
     for k,v in pairs(tokens.vars) do _ENV[k] = oldenv[k] end
@@ -997,6 +933,8 @@ function shell.runAsync(...)
 end
 
 function multishell.launch(environment, path, ...)
+    expect(1, environment, "table")
+    expect(2, path, "string")
     local coro, pid
     local tok = {[0] = path, ...}
     if CCKernel2 then pid = kernel.fork(path, function() execv(tok) end)
@@ -1046,10 +984,14 @@ if args[1] ~= nil then
     for line in file:lines() do 
         shell.run(line) 
         vars.LINENUM = vars.LINENUM + 1
+        if not running then break end
     end
+    file:close()
     vars.LINENUM = nil
     return shell_retval
 end
+
+if topshell == nil then shell.run("rom/startup.lua") end
 
 if CCKernel2 then
     if fs.exists("/etc/cashrc") then
@@ -1155,7 +1097,8 @@ end
 
 local function readCommand()
     if term.getGraphicsMode and term.getGraphicsMode() then term.setGraphicsMode(false) end
-    ansiWrite(getPrompt())
+    local prompt = getPrompt()
+    ansiWrite(prompt)
     local str = ""
     local ox, oy = term.getCursorPos()
     local coff = 0
